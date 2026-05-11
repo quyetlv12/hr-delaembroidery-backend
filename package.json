@@ -11,7 +11,7 @@
     "test": "npm run build",
     "migrate": "tsx src/database/migrate.ts",
     "seed": "tsx src/database/seed.ts",
-    "typeorm": "typeorm-ts-node-commonjs",
+    "typeorm": "tsx ./node_modules/typeorm/cli.js",
     "reset:attendance-payroll": "tsx src/database/reset-attendance-payroll.ts"
   },
   "keywords": [],

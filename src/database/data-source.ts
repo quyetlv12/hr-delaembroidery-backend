@@ -12,7 +12,11 @@ export const AppDataSource = new DataSource({
   password: env.DB_PASSWORD,
   database: env.DB_NAME,
   entities: Object.values(entities),
-  migrations: ["src/migrations/*.ts"],
+  migrations: [
+    process.env.NODE_ENV === "production" 
+      ? "dist/migrations/*.js" 
+      : "src/migrations/*.ts"
+  ],
   synchronize: false,
   logging: env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
 });
