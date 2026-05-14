@@ -6,7 +6,19 @@ import type { Repository } from "typeorm";
 import { allPermissions, systemRoles } from "../config/permissions";
 import { env } from "../config/env";
 import { generateLoginCode, getLoginCodeFromEmployeeCode } from "../common/login-code";
-import { BankAccount, Department, Employee, Permission, Position, Role, User } from "../entities";
+import {
+  BankAccount,
+  Department,
+  Employee,
+  EmployeeViewSetting,
+  PayrollFormulaSetting,
+  Permission,
+  Position,
+  Role,
+  User,
+} from "../entities";
+import { defaultEmployeeViewSettings } from "../modules/employee-view-settings/employee-view-settings.constants";
+import { DEFAULT_PAYROLL_FORMULA_SETTING } from "../modules/payroll/payroll-formula";
 import { AppDataSource } from "./data-source";
 
 async function seed() {
@@ -15,11 +27,16 @@ async function seed() {
 
   const departmentRepository = AppDataSource.getRepository(Department);
   const employeeRepository = AppDataSource.getRepository(Employee);
+  const employeeViewSettingRepository = AppDataSource.getRepository(EmployeeViewSetting);
   const bankAccountRepository = AppDataSource.getRepository(BankAccount);
+  const payrollFormulaSettingRepository = AppDataSource.getRepository(PayrollFormulaSetting);
   const permissionRepository = AppDataSource.getRepository(Permission);
   const positionRepository = AppDataSource.getRepository(Position);
   const roleRepository = AppDataSource.getRepository(Role);
   const userRepository = AppDataSource.getRepository(User);
+
+  await seedPayrollFormulaSetting(payrollFormulaSettingRepository);
+  await seedEmployeeViewSetting(employeeViewSettingRepository);
 
   const permissions = await Promise.all(
     allPermissions.map(async (code) => {
@@ -250,6 +267,51 @@ async function upsertBankAccount(
   }
 
   return bankAccountRepository.save(bankAccountRepository.create(bankAccountData));
+}
+
+async function seedPayrollFormulaSetting(
+  payrollFormulaSettingRepository: Repository<PayrollFormulaSetting>,
+) {
+  const existingSetting = await payrollFormulaSettingRepository.findOne({
+    where: {},
+    order: { createdAt: "ASC" },
+  });
+  if (existingSetting) {
+    return existingSetting;
+  }
+
+  return payrollFormulaSettingRepository.save(
+    payrollFormulaSettingRepository.create({
+      insuranceBaseSalary: String(DEFAULT_PAYROLL_FORMULA_SETTING.insuranceBaseSalary),
+      employeeInsuranceRate: String(DEFAULT_PAYROLL_FORMULA_SETTING.employeeInsuranceRate),
+      employerInsuranceRate: String(DEFAULT_PAYROLL_FORMULA_SETTING.employerInsuranceRate),
+      earningCategories: DEFAULT_PAYROLL_FORMULA_SETTING.earningCategories.map((category) => ({ ...category })),
+      deductionCategories: DEFAULT_PAYROLL_FORMULA_SETTING.deductionCategories.map((category) => ({ ...category })),
+      dailySalaryFormula: DEFAULT_PAYROLL_FORMULA_SETTING.dailySalaryFormula,
+      grossSalaryFormula: DEFAULT_PAYROLL_FORMULA_SETTING.grossSalaryFormula,
+      deductionFormula: DEFAULT_PAYROLL_FORMULA_SETTING.deductionFormula,
+      netSalaryFormula: DEFAULT_PAYROLL_FORMULA_SETTING.netSalaryFormula,
+    }),
+  );
+}
+
+async function seedEmployeeViewSetting(
+  employeeViewSettingRepository: Repository<EmployeeViewSetting>,
+) {
+  const existingSetting = await employeeViewSettingRepository.findOne({
+    where: {},
+    order: { createdAt: "ASC" },
+  });
+  if (existingSetting) {
+    return existingSetting;
+  }
+
+  return employeeViewSettingRepository.save(
+    employeeViewSettingRepository.create({
+      payrollColumns: [...defaultEmployeeViewSettings.payrollColumns],
+      attendanceColumns: [...defaultEmployeeViewSettings.attendanceColumns],
+    }),
+  );
 }
 
 async function syncEmployeeUserAccounts(

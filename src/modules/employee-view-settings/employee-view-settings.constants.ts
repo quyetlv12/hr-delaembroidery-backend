@@ -45,5 +45,10 @@ export const attendanceEmployeeViewColumns = [
   "status",
 ] as const;
 
+export const defaultEmployeeViewSettings = {
+  payrollColumns: [...payrollEmployeeViewColumns],
+  attendanceColumns: [...attendanceEmployeeViewColumns],
+};
+
 export type PayrollEmployeeViewColumn = (typeof payrollEmployeeViewColumns)[number];
 export type AttendanceEmployeeViewColumn = (typeof attendanceEmployeeViewColumns)[number];

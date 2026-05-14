@@ -2,16 +2,12 @@ import { AppDataSource } from "../../database/data-source";
 import { EmployeeViewSetting } from "../../entities";
 import {
   attendanceEmployeeViewColumns,
+  defaultEmployeeViewSettings,
   payrollEmployeeViewColumns,
   type AttendanceEmployeeViewColumn,
   type PayrollEmployeeViewColumn,
 } from "./employee-view-settings.constants";
 import type { EmployeeViewSettingsDto } from "./employee-view-settings.dto";
-
-export const defaultEmployeeViewSettings: EmployeeViewSettingsDto = {
-  payrollColumns: [...payrollEmployeeViewColumns],
-  attendanceColumns: [...attendanceEmployeeViewColumns],
-};
 
 export class EmployeeViewSettingsService {
   private readonly repository = AppDataSource.getRepository(EmployeeViewSetting);

@@ -1,4 +1,5 @@
 import type { Allowance, Deduction } from "../../entities";
+import type { PayrollFormulaSettingDto } from "./payroll.dto";
 
 export const DEFAULT_INSURANCE_SALARY = 5_062_000;
 
@@ -25,7 +26,7 @@ type PayrollFormulaCategoryResult = PayrollFormulaCategoryInput & {
   type: "earning" | "deduction";
 };
 
-const DEFAULT_EARNING_CATEGORIES: PayrollFormulaCategoryInput[] = [
+export const DEFAULT_EARNING_CATEGORIES: PayrollFormulaCategoryInput[] = [
   { key: "luongCoDinh", name: "Lương cố định", formula: "baoHiemNgay" },
   { key: "trachNhiem", name: "Trách nhiệm", formula: "phuCapTrachNhiem / ngayCong" },
   { key: "anCa", name: "Ăn ca", formula: "phuCapAnCa / ngayCong" },
@@ -37,11 +38,23 @@ const DEFAULT_EARNING_CATEGORIES: PayrollFormulaCategoryInput[] = [
   },
 ];
 
-const DEFAULT_DEDUCTION_CATEGORIES: PayrollFormulaCategoryInput[] = [
+export const DEFAULT_DEDUCTION_CATEGORIES: PayrollFormulaCategoryInput[] = [
   { key: "bhxhNhanVien", name: "BHXH NLĐ", formula: "luongBHXH * tyLeBHXHNLD / 100" },
   { key: "thueTNCN", name: "Thuế TNCN", formula: "khauTruThue" },
   { key: "tamUng", name: "Tạm ứng", formula: "tamUng" },
 ];
+
+export const DEFAULT_PAYROLL_FORMULA_SETTING: PayrollFormulaSettingDto = {
+  insuranceBaseSalary: DEFAULT_INSURANCE_SALARY,
+  employeeInsuranceRate: 10.5,
+  employerInsuranceRate: 21.5,
+  earningCategories: DEFAULT_EARNING_CATEGORIES,
+  deductionCategories: DEFAULT_DEDUCTION_CATEGORIES,
+  dailySalaryFormula: "luongCoDinh + trachNhiem + anCa + dienThoai + kpi",
+  grossSalaryFormula: "luongThang + luongTangCa",
+  deductionFormula: "bhxhNhanVien + thueTNCN + tamUng",
+  netSalaryFormula: "tongLuong - tongGiamTru",
+};
 
 type PayrollFormulaInput = {
   actualSalary: number;

@@ -20,37 +20,13 @@ import {
   type PayrollEmployeeViewColumn,
 } from "../employee-view-settings/employee-view-settings.constants";
 import { EmployeeViewSettingsService } from "../employee-view-settings/employee-view-settings.service";
-import { calculateExcelPayroll, DEFAULT_INSURANCE_SALARY } from "./payroll-formula";
+import { calculateExcelPayroll, DEFAULT_PAYROLL_FORMULA_SETTING } from "./payroll-formula";
 import type { PayrollFormulaSettingDto, PayrollPeriodDto } from "./payroll.dto";
 
 const DEFAULT_OVERTIME_RATE = 1.5;
 const DEFAULT_TRANSFER_DEBIT_ACCOUNT = "111003013254";
 const DEFAULT_TRANSFER_BANK_CODE = "79321001";
-const DEFAULT_FORMULA_SETTING: PayrollFormulaSettingDto = {
-  insuranceBaseSalary: DEFAULT_INSURANCE_SALARY,
-  employeeInsuranceRate: 10.5,
-  employerInsuranceRate: 21.5,
-  earningCategories: [
-    { key: "luongCoDinh", name: "Lương cố định", formula: "baoHiemNgay" },
-    { key: "trachNhiem", name: "Trách nhiệm", formula: "phuCapTrachNhiem / ngayCong" },
-    { key: "anCa", name: "Ăn ca", formula: "phuCapAnCa / ngayCong" },
-    { key: "dienThoai", name: "Điện thoại", formula: "phuCapDienThoai / ngayCong" },
-    {
-      key: "kpi",
-      name: "KPI",
-      formula: "(luongNgayThucHuong - baoHiemNgay) + (phuCapKpi + phuCapKhac + thuongLe) / ngayCong",
-    },
-  ],
-  deductionCategories: [
-    { key: "bhxhNhanVien", name: "BHXH NLĐ", formula: "luongBHXH * tyLeBHXHNLD / 100" },
-    { key: "thueTNCN", name: "Thuế TNCN", formula: "khauTruThue" },
-    { key: "tamUng", name: "Tạm ứng", formula: "tamUng" },
-  ],
-  dailySalaryFormula: "luongCoDinh + trachNhiem + anCa + dienThoai + kpi",
-  grossSalaryFormula: "luongThang + luongTangCa",
-  deductionFormula: "bhxhNhanVien + thueTNCN + tamUng",
-  netSalaryFormula: "tongLuong - tongGiamTru",
-};
+const DEFAULT_FORMULA_SETTING: PayrollFormulaSettingDto = DEFAULT_PAYROLL_FORMULA_SETTING;
 
 export class PayrollService {
   private readonly attendanceRepository = AppDataSource.getRepository(AttendanceSummary);
@@ -502,7 +478,8 @@ export class PayrollService {
     const storedConfiguredSalary = Number(record.configuredSalary);
     const configuredSalary = storedConfiguredSalary > 0 ? storedConfiguredSalary : Number(record.employee.baseSalary || 0);
     const storedInsuranceSalary = Number(record.insuranceSalary);
-    const insuranceSalary = storedInsuranceSalary > 0 ? storedInsuranceSalary : configuredSalary > 0 ? DEFAULT_INSURANCE_SALARY : 0;
+    const insuranceSalary =
+      storedInsuranceSalary > 0 ? storedInsuranceSalary : configuredSalary > 0 ? DEFAULT_FORMULA_SETTING.insuranceBaseSalary : 0;
     const storedFixedDailySalary = Number(record.fixedDailySalary);
     const fixedDailySalary =
       storedFixedDailySalary > 0 ? storedFixedDailySalary : standardWorkDay > 0 ? insuranceSalary / standardWorkDay : 0;
