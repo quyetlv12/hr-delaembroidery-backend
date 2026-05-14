@@ -63,10 +63,6 @@ export class RolesPermissionsService {
 
   async update(id: string, dto: SaveRoleDto) {
     const role = await this.findRoleOrFail(id);
-    if (role.isSystem) {
-      throw new HttpError(400, "SYSTEM_ROLE_LOCKED", "Không thể sửa vai trò hệ thống");
-    }
-
     role.name = dto.name;
     role.permissions = await this.findPermissions(dto.permissionCodes);
     const savedRole = await this.roleRepository.save(role);

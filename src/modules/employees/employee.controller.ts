@@ -61,6 +61,53 @@ export async function deleteEmployeeController(req: Request, res: Response) {
   return ok(res, result, "Đã xóa nhân viên");
 }
 
+export async function listEmployeeDocumentsController(req: Request, res: Response) {
+  const employeeId = getEmployeeIdParam(req);
+  const documents = await employeeService.listDocuments(employeeId);
+  return ok(res, documents);
+}
+
+export async function uploadEmployeeDocumentsController(req: Request, res: Response) {
+  const employeeId = getEmployeeIdParam(req);
+  const files = Array.isArray(req.files) ? req.files : [];
+  const documents = await employeeService.uploadDocuments(employeeId, files);
+  return created(res, documents, "Đã tải file nhân viên");
+}
+
+export async function downloadEmployeeDocumentController(req: Request, res: Response) {
+  const employeeId = getEmployeeIdParam(req);
+  const documentId = getDocumentIdParam(req);
+  const document = await employeeService.getDocumentForDownload(employeeId, documentId);
+  res.download(document.path, document.fileName, {
+    headers: {
+      "Content-Type": document.mimeType,
+    },
+  });
+}
+
+export async function deleteEmployeeDocumentController(req: Request, res: Response) {
+  const employeeId = getEmployeeIdParam(req);
+  const documentId = getDocumentIdParam(req);
+  const result = await employeeService.deleteDocument(employeeId, documentId);
+  return ok(res, result, "Đã xóa file nhân viên");
+}
+
+function getEmployeeIdParam(req: Request) {
+  const id = req.params.id;
+  if (typeof id !== "string") {
+    throw new HttpError(400, "INVALID_EMPLOYEE_ID", "ID nhân viên không hợp lệ");
+  }
+  return id;
+}
+
+function getDocumentIdParam(req: Request) {
+  const documentId = req.params.documentId;
+  if (typeof documentId !== "string") {
+    throw new HttpError(400, "INVALID_EMPLOYEE_DOCUMENT_ID", "ID file không hợp lệ");
+  }
+  return documentId;
+}
+
 function isEmployeeSelfService(req: Request) {
   return (
     Boolean(req.user?.employeeId) &&

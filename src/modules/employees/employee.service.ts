@@ -1,10 +1,15 @@
+import { unlink } from "node:fs/promises";
+
 import { HttpError } from "../../common/http-error";
-import { Employee } from "../../entities";
+import { AppDataSource } from "../../database/data-source";
+import { Employee, EmployeeDocument } from "../../entities";
 import { PayrollService } from "../payroll/payroll.service";
 import type { CreateEmployeeDto, UpdateEmployeeDto } from "./employee.dto";
 import { EmployeeRepository } from "./employee.repository";
 
 export class EmployeeService {
+  private readonly documentRepository = AppDataSource.getRepository(EmployeeDocument);
+
   constructor(
     private readonly employeeRepository = new EmployeeRepository(),
     private readonly payrollService = new PayrollService(),
@@ -57,6 +62,72 @@ export class EmployeeService {
     return this.employeeRepository.getFormOptions();
   }
 
+  async listDocuments(employeeId: string) {
+    await this.ensureEmployeeExists(employeeId);
+    const documents = await this.documentRepository.find({
+      where: { employee: { id: employeeId } },
+      relations: { employee: true },
+      order: { createdAt: "DESC" },
+    });
+    return documents.map((document) => this.toDocumentDto(document));
+  }
+
+  async uploadDocuments(employeeId: string, files: Express.Multer.File[]) {
+    const employee = await this.ensureEmployeeExists(employeeId);
+    if (files.length === 0) {
+      throw new HttpError(400, "EMPLOYEE_DOCUMENT_REQUIRED", "Vui lòng chọn file để tải lên");
+    }
+
+    const documents = await this.documentRepository.save(
+      files.map((file) =>
+        this.documentRepository.create({
+          employee,
+          originalName: file.originalname,
+          storedName: file.filename,
+          mimeType: file.mimetype,
+          size: String(file.size),
+          storagePath: file.path,
+        }),
+      ),
+    );
+    return documents.map((document) => this.toDocumentDto(document));
+  }
+
+  async getDocumentForDownload(employeeId: string, documentId: string) {
+    const document = await this.findDocument(employeeId, documentId);
+    return {
+      path: document.storagePath,
+      fileName: document.originalName,
+      mimeType: document.mimeType ?? "application/octet-stream",
+    };
+  }
+
+  async deleteDocument(employeeId: string, documentId: string) {
+    const document = await this.findDocument(employeeId, documentId);
+    await this.documentRepository.softDelete(document.id);
+    await unlink(document.storagePath).catch(() => undefined);
+    return { id: document.id };
+  }
+
+  private async ensureEmployeeExists(employeeId: string) {
+    const employee = await this.employeeRepository.findById(employeeId);
+    if (!employee) {
+      throw new HttpError(404, "EMPLOYEE_NOT_FOUND", "Không tìm thấy nhân viên");
+    }
+    return employee;
+  }
+
+  private async findDocument(employeeId: string, documentId: string) {
+    const document = await this.documentRepository.findOne({
+      where: { id: documentId, employee: { id: employeeId } },
+      relations: { employee: true },
+    });
+    if (!document) {
+      throw new HttpError(404, "EMPLOYEE_DOCUMENT_NOT_FOUND", "Không tìm thấy file nhân viên");
+    }
+    return document;
+  }
+
   private toDto(employee: Employee) {
     const primaryBankAccount = employee.bankAccounts?.find((bankAccount) => bankAccount.isPrimary);
 
@@ -86,6 +157,16 @@ export class EmployeeService {
       taxCode: employee.taxCode ?? undefined,
       insuranceCode: employee.insuranceCode ?? undefined,
       status: employee.status,
+    };
+  }
+
+  private toDocumentDto(document: EmployeeDocument) {
+    return {
+      id: document.id,
+      originalName: document.originalName,
+      mimeType: document.mimeType ?? undefined,
+      size: Number(document.size),
+      uploadedAt: document.createdAt,
     };
   }
 }

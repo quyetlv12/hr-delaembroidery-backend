@@ -7,14 +7,23 @@ import { permissionGuard } from "../../guards/permission.guard";
 import {
   calculatePayrollController,
   exportPayrollTransferFileController,
+  getPayrollFormulaSettingController,
   listPayrollController,
   lockPayrollController,
+  updatePayrollFormulaSettingController,
 } from "./payroll.controller";
-import { payrollPeriodDto } from "./payroll.dto";
+import { payrollFormulaSettingDto, payrollPeriodDto } from "./payroll.dto";
 
 export const payrollRoutes = Router();
 
 payrollRoutes.use(authGuard);
+payrollRoutes.get("/settings/formula", permissionGuard(PERMISSIONS.payrollRead), getPayrollFormulaSettingController);
+payrollRoutes.put(
+  "/settings/formula",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  validateBody(payrollFormulaSettingDto),
+  updatePayrollFormulaSettingController,
+);
 payrollRoutes.get("/", permissionGuard(PERMISSIONS.payrollRead), listPayrollController);
 payrollRoutes.post(
   "/calculate",

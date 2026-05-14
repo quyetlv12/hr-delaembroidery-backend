@@ -24,7 +24,7 @@ export const createEmployeeDto = z.object({
   positionId: optionalUuid,
   joinDate: z.string().min(1),
   contractType: z.string().optional(),
-  shiftCount: z.coerce.number().int().min(1).max(2).default(2),
+  shiftCount: z.coerce.number().int().min(1).max(3).default(2),
   salary: z.coerce.number().min(0),
   bankAccount: z.string().optional(),
   bankName: z.string().optional(),

@@ -16,6 +16,12 @@ export class AttendanceSetting extends AppBaseEntity {
   @Column({ name: "afternoon_end", type: "varchar", length: 5, default: "17:30" })
   afternoonEnd!: string;
 
+  @Column({ name: "night_start", type: "varchar", length: 5, default: "18:00" })
+  nightStart!: string;
+
+  @Column({ name: "night_end", type: "varchar", length: 5, default: "21:00" })
+  nightEnd!: string;
+
   @Column({ name: "overtime_rate", type: "decimal", precision: 5, scale: 2, default: 1.5 })
   overtimeRate!: string;
 }

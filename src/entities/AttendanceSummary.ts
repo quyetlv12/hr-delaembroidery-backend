@@ -29,6 +29,12 @@ export class AttendanceSummary extends AppBaseEntity {
   @Column({ name: "afternoon_check_out_at", type: "datetime", nullable: true })
   afternoonCheckOutAt?: Date | null;
 
+  @Column({ name: "night_check_in_at", type: "datetime", nullable: true })
+  nightCheckInAt?: Date | null;
+
+  @Column({ name: "night_check_out_at", type: "datetime", nullable: true })
+  nightCheckOutAt?: Date | null;
+
   @Column({ name: "late_minutes", type: "int", default: 0 })
   lateMinutes!: number;
 

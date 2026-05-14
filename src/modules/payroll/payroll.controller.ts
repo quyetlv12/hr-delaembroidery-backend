@@ -4,6 +4,7 @@ import { ok } from "../../common/api-response";
 import { HttpError } from "../../common/http-error";
 import { PERMISSIONS } from "../../config/permissions";
 import { PayrollService } from "./payroll.service";
+import type { PayrollFormulaSettingDto } from "./payroll.dto";
 
 const payrollService = new PayrollService();
 
@@ -30,6 +31,19 @@ export async function listPayrollController(req: Request, res: Response) {
 export async function calculatePayrollController(req: Request, res: Response) {
   const payroll = await payrollService.calculatePeriod(req.body);
   return ok(res, payroll, "Đã tính lương");
+}
+
+export async function getPayrollFormulaSettingController(_req: Request, res: Response) {
+  const settings = await payrollService.getFormulaSetting();
+  return ok(res, settings);
+}
+
+export async function updatePayrollFormulaSettingController(
+  req: Request<unknown, unknown, PayrollFormulaSettingDto>,
+  res: Response,
+) {
+  const settings = await payrollService.updateFormulaSetting(req.body);
+  return ok(res, settings, "Đã cập nhật công thức bảng lương");
 }
 
 export async function lockPayrollController(req: Request, res: Response) {

@@ -12,6 +12,11 @@ import {
   Deduction,
   Employee,
 } from "../../entities";
+import {
+  attendanceEmployeeViewColumns,
+  type AttendanceEmployeeViewColumn,
+} from "../employee-view-settings/employee-view-settings.constants";
+import { EmployeeViewSettingsService } from "../employee-view-settings/employee-view-settings.service";
 import { calculateExcelPayroll } from "../payroll/payroll-formula";
 import { getMonthRange, PayrollService } from "../payroll/payroll.service";
 import type {
@@ -28,6 +33,13 @@ type ParsedDateColumn = {
   label: string;
 };
 
+type AttendanceHeader = {
+  rowIndex: number;
+  codeIndex: number;
+  nameIndex: number;
+  dateColumns: ParsedDateColumn[];
+};
+
 type ImportOptions = {
   file: Express.Multer.File;
   month?: number;
@@ -40,6 +52,8 @@ type ShiftSessions = {
   morningOut: number | null;
   afternoonIn: number | null;
   afternoonOut: number | null;
+  nightIn: number | null;
+  nightOut: number | null;
   workDay: number;
   isMissingPunch: boolean;
 };
@@ -48,8 +62,11 @@ type ShiftSchedule = {
   morningStart: number;
   morningEnd: number;
   lunchSplit: number;
+  dinnerSplit: number;
   afternoonStart: number;
   afternoonEnd: number;
+  nightStart: number;
+  nightEnd: number;
   noLunchPunchMorningLimit: number;
   noLunchPunchAfternoonLimit: number;
 };
@@ -62,6 +79,8 @@ type ParsedAttendanceCell = {
     morningOut?: string;
     afternoonIn?: string;
     afternoonOut?: string;
+    nightIn?: string;
+    nightOut?: string;
   };
   checkInAt: Date | null;
   checkOutAt: Date | null;
@@ -69,6 +88,8 @@ type ParsedAttendanceCell = {
   morningCheckOutAt: Date | null;
   afternoonCheckInAt: Date | null;
   afternoonCheckOutAt: Date | null;
+  nightCheckInAt: Date | null;
+  nightCheckOutAt: Date | null;
   lateMinutes: number;
   earlyLeaveMinutes: number;
   overtimeMinutes: number;
@@ -162,6 +183,8 @@ const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettingsDto = {
   morningEnd: "11:30",
   afternoonStart: "13:30",
   afternoonEnd: "17:30",
+  nightStart: "18:00",
+  nightEnd: "21:00",
   overtimeRate: 1.5,
 };
 export class AttendanceService {
@@ -173,6 +196,7 @@ export class AttendanceService {
   private readonly settingRepository = AppDataSource.getRepository(AttendanceSetting);
   private readonly summaryRepository = AppDataSource.getRepository(AttendanceSummary);
   private readonly payrollService = new PayrollService();
+  private readonly employeeViewSettingsService = new EmployeeViewSettingsService();
 
   async getSettings() {
     const settings = await this.findSettings();
@@ -188,6 +212,8 @@ export class AttendanceService {
       morningEnd: dto.morningEnd,
       afternoonStart: dto.afternoonStart,
       afternoonEnd: dto.afternoonEnd,
+      nightStart: dto.nightStart,
+      nightEnd: dto.nightEnd,
       overtimeRate: String(dto.overtimeRate),
     });
 
@@ -253,21 +279,28 @@ export class AttendanceService {
     });
     const logsBySummaryKey = groupUniqueLogsByAttendanceKey(logs);
 
+    const rows = summaries.map((summary) => {
+      const log = logsBySummaryKey.get(getAttendanceKey(summary.employee.id, summary.workDate));
+      const parsedFallback = this.parseLogShiftTimes(summary, log, schedule);
+      return this.toSummaryDto(summary, parsedFallback);
+    });
+    const visibleColumns = employeeId
+      ? (await this.employeeViewSettingsService.getSettings()).attendanceColumns
+      : [...attendanceEmployeeViewColumns];
+    const totals = {
+      rows: summaries.length,
+      workDay: roundNumber(sum(summaries.map((summary) => Number(summary.workDay)))),
+      lateMinutes: sum(summaries.map((summary) => summary.lateMinutes)),
+      earlyLeaveMinutes: sum(summaries.map((summary) => summary.earlyLeaveMinutes)),
+      overtimeMinutes: sum(summaries.map((summary) => summary.overtimeMinutes)),
+    };
+
     return {
       month,
       year,
-      rows: summaries.map((summary) => {
-        const log = logsBySummaryKey.get(getAttendanceKey(summary.employee.id, summary.workDate));
-        const parsedFallback = this.parseLogShiftTimes(summary, log, schedule);
-        return this.toSummaryDto(summary, parsedFallback);
-      }),
-      totals: {
-        rows: summaries.length,
-        workDay: roundNumber(sum(summaries.map((summary) => Number(summary.workDay)))),
-        lateMinutes: sum(summaries.map((summary) => summary.lateMinutes)),
-        earlyLeaveMinutes: sum(summaries.map((summary) => summary.earlyLeaveMinutes)),
-        overtimeMinutes: sum(summaries.map((summary) => summary.overtimeMinutes)),
-      },
+      rows: employeeId ? rows.map((row) => filterAttendanceRow(row, visibleColumns)) : rows,
+      totals: employeeId ? filterAttendanceTotals(totals, visibleColumns) : totals,
+      visibleColumns,
     };
   }
 
@@ -358,18 +391,8 @@ export class AttendanceService {
 
     const importMonthInput = normalizeImportMonth(options.month);
     const importYear = normalizeImportYear(options.year);
-    const header = rows[0] ?? [];
-    const codeIndex = findHeaderIndex(header, ["mã nhân viên", "ma nhan vien", "employee code", "code", "id"]);
-    const nameIndex = findHeaderIndex(header, ["tên", "ten", "employee name", "name"]);
-    const dateColumns = parseDateColumns(header, importMonthInput);
-
-    if (codeIndex < 0 || nameIndex < 0 || dateColumns.length === 0) {
-      throw new HttpError(
-        422,
-        "INVALID_ATTENDANCE_FILE",
-        "File phải có mã nhân viên, tên nhân viên và các cột ngày",
-      );
-    }
+    const attendanceHeader = findAttendanceHeader(rows, importMonthInput);
+    const { codeIndex, nameIndex, dateColumns } = attendanceHeader;
 
     const importedMonths = Array.from(new Set(dateColumns.map((column) => column.month)));
     if (importedMonths.length !== 1) {
@@ -384,7 +407,7 @@ export class AttendanceService {
     const unmatchedRows: Array<{ code: string; name: string }> = [];
     let createdEmployees = 0;
 
-    for (const row of rows.slice(1)) {
+    for (const row of rows.slice(attendanceHeader.rowIndex + 1)) {
       const rawCode = stringCell(row[codeIndex]);
       const rawName = stringCell(row[nameIndex]);
       if (!rawCode && !rawName) {
@@ -438,6 +461,8 @@ export class AttendanceService {
             morningCheckOutAt: parsedCell.morningCheckOutAt,
             afternoonCheckInAt: parsedCell.afternoonCheckInAt,
             afternoonCheckOutAt: parsedCell.afternoonCheckOutAt,
+            nightCheckInAt: parsedCell.nightCheckInAt,
+            nightCheckOutAt: parsedCell.nightCheckOutAt,
             lateMinutes: parsedCell.lateMinutes,
             earlyLeaveMinutes: parsedCell.earlyLeaveMinutes,
             overtimeMinutes: parsedCell.overtimeMinutes,
@@ -542,6 +567,8 @@ export class AttendanceService {
       morningEnd: settings.morningEnd,
       afternoonStart: settings.afternoonStart,
       afternoonEnd: settings.afternoonEnd,
+      nightStart: settings.nightStart ?? DEFAULT_ATTENDANCE_SETTINGS.nightStart,
+      nightEnd: settings.nightEnd ?? DEFAULT_ATTENDANCE_SETTINGS.nightEnd,
       overtimeRate: Number(settings.overtimeRate ?? DEFAULT_ATTENDANCE_SETTINGS.overtimeRate),
     };
   }
@@ -581,6 +608,8 @@ export class AttendanceService {
       morningCheckOutAt: summary.morningCheckOutAt ?? parsedFallback?.morningCheckOutAt ?? undefined,
       afternoonCheckInAt: summary.afternoonCheckInAt ?? parsedFallback?.afternoonCheckInAt ?? undefined,
       afternoonCheckOutAt: summary.afternoonCheckOutAt ?? parsedFallback?.afternoonCheckOutAt ?? undefined,
+      nightCheckInAt: summary.nightCheckInAt ?? parsedFallback?.nightCheckInAt ?? undefined,
+      nightCheckOutAt: summary.nightCheckOutAt ?? parsedFallback?.nightCheckOutAt ?? undefined,
       lateMinutes: summary.lateMinutes,
       earlyLeaveMinutes: summary.earlyLeaveMinutes,
       overtimeMinutes: summary.overtimeMinutes,
@@ -622,6 +651,8 @@ export class AttendanceService {
     summary.morningCheckOutAt = parsedCell.morningCheckOutAt;
     summary.afternoonCheckInAt = parsedCell.afternoonCheckInAt;
     summary.afternoonCheckOutAt = parsedCell.afternoonCheckOutAt;
+    summary.nightCheckInAt = parsedCell.nightCheckInAt;
+    summary.nightCheckOutAt = parsedCell.nightCheckOutAt;
     summary.lateMinutes = parsedCell.lateMinutes;
     summary.earlyLeaveMinutes = parsedCell.earlyLeaveMinutes;
     summary.overtimeMinutes = parsedCell.overtimeMinutes;
@@ -679,18 +710,8 @@ export class AttendanceService {
       throw new HttpError(422, "INVALID_ATTENDANCE_FILE", "File chấm công không có dòng dữ liệu");
     }
 
-    const header = rows[0] ?? [];
-    const codeIndex = findHeaderIndex(header, ["mã nhân viên", "ma nhan vien", "employee code", "code", "id"]);
-    const nameIndex = findHeaderIndex(header, ["tên", "ten", "employee name", "name"]);
-    const dateColumns = parseDateColumns(header, importMonthInput);
-
-    if (codeIndex < 0 || nameIndex < 0 || dateColumns.length === 0) {
-      throw new HttpError(
-        422,
-        "INVALID_ATTENDANCE_FILE",
-        "File phải có mã nhân viên, tên nhân viên và các cột ngày",
-      );
-    }
+    const attendanceHeader = findAttendanceHeader(rows, importMonthInput);
+    const { codeIndex, nameIndex, dateColumns } = attendanceHeader;
 
     const importedMonths = Array.from(new Set(dateColumns.map((column) => column.month)));
     if (importedMonths.length !== 1) {
@@ -701,7 +722,7 @@ export class AttendanceService {
     const employeeMap = createEmployeeMap(employees);
     const previewRows: AttendancePreviewRow[] = [];
 
-    for (const row of rows.slice(1)) {
+    for (const row of rows.slice(attendanceHeader.rowIndex + 1)) {
       const rawCode = stringCell(row[codeIndex]);
       const rawName = stringCell(row[nameIndex]);
       if (!rawCode && !rawName) {
@@ -788,6 +809,7 @@ export class AttendanceService {
       this.allowanceRepository.find({ where: { isActive: true }, relations: { employee: true } }),
       this.deductionRepository.find({ where: { isActive: true }, relations: { employee: true } }),
     ]);
+    const formulaSetting = await this.payrollService.getFormulaSetting();
     const standardWorkDay = monthSetting.standardWorkDay;
     const bonusTotal = monthSetting.holidayBonusTotal;
     const records = previewRows.map((row) => {
@@ -803,6 +825,17 @@ export class AttendanceService {
         overtimeMinutes,
         overtimeRate,
         holidayBonusTotal: bonusTotal,
+        insuranceSalary: formulaSetting.insuranceBaseSalary,
+        employeeInsuranceRate: formulaSetting.employeeInsuranceRate,
+        employerInsuranceRate: formulaSetting.employerInsuranceRate,
+        formulas: {
+          dailySalaryFormula: formulaSetting.dailySalaryFormula,
+          grossSalaryFormula: formulaSetting.grossSalaryFormula,
+          deductionFormula: formulaSetting.deductionFormula,
+          netSalaryFormula: formulaSetting.netSalaryFormula,
+          earningCategories: formulaSetting.earningCategories,
+          deductionCategories: formulaSetting.deductionCategories,
+        },
         allowances: allowances.filter((allowance) => employee && allowance.employee.id === employee.id),
         deductions: deductions.filter((deduction) => employee && deduction.employee.id === employee.id),
       });
@@ -907,6 +940,8 @@ export class AttendanceService {
             morningCheckOutAt: parsedCell.morningCheckOutAt,
             afternoonCheckInAt: parsedCell.afternoonCheckInAt,
             afternoonCheckOutAt: parsedCell.afternoonCheckOutAt,
+            nightCheckInAt: parsedCell.nightCheckInAt,
+            nightCheckOutAt: parsedCell.nightCheckOutAt,
             lateMinutes: parsedCell.lateMinutes,
             earlyLeaveMinutes: parsedCell.earlyLeaveMinutes,
             overtimeMinutes: parsedCell.overtimeMinutes,
@@ -999,6 +1034,56 @@ function parseWorkbookRows(file: Express.Multer.File) {
 function findHeaderIndex(header: unknown[], names: string[]) {
   const normalizedNames = names.map(normalizeKey);
   return header.findIndex((cell) => normalizedNames.includes(normalizeKey(stringCell(cell))));
+}
+
+function findAttendanceHeader(rows: unknown[][], selectedMonth?: number): AttendanceHeader {
+  const codeHeaderNames = [
+    "mã nhân viên",
+    "ma nhan vien",
+    "mã nv",
+    "ma nv",
+    "mã",
+    "ma",
+    "employee code",
+    "code",
+    "id",
+  ];
+  const nameHeaderNames = [
+    "tên",
+    "ten",
+    "họ tên",
+    "ho ten",
+    "họ và tên",
+    "ho va ten",
+    "nhân viên",
+    "nhan vien",
+    "employee name",
+    "name",
+  ];
+
+  for (const [rowIndex, header] of rows.entries()) {
+    const codeIndex = findHeaderIndex(header, codeHeaderNames);
+    const nameIndex = findHeaderIndex(header, nameHeaderNames);
+    if (codeIndex < 0 || nameIndex < 0) {
+      continue;
+    }
+
+    const dateColumns = parseDateColumns(header, selectedMonth);
+    if (dateColumns.length > 0) {
+      return {
+        rowIndex,
+        codeIndex,
+        nameIndex,
+        dateColumns,
+      };
+    }
+  }
+
+  throw new HttpError(
+    422,
+    "INVALID_ATTENDANCE_FILE",
+    "File phải có dòng tiêu đề gồm mã nhân viên, tên nhân viên và các cột ngày",
+  );
 }
 
 function parseDateColumns(header: unknown[], selectedMonth?: number) {
@@ -1154,16 +1239,22 @@ function parseAttendanceCell(
     sessions.afternoonIn === null ? null : dateFromMinutes(year, month, day, sessions.afternoonIn);
   const afternoonCheckOutAt =
     sessions.afternoonOut === null ? null : dateFromMinutes(year, month, day, sessions.afternoonOut);
+  const nightCheckInAt = sessions.nightIn === null ? null : dateFromMinutes(year, month, day, sessions.nightIn);
+  const nightCheckOutAt = sessions.nightOut === null ? null : dateFromMinutes(year, month, day, sessions.nightOut);
+  const hasNightShift = shiftCount >= 3;
   const lateMinutes = isFullDayLeave
     ? 0
     : getLateMinutes(sessions.morningIn, schedule.morningStart) +
-      getLateMinutes(sessions.afternoonIn, schedule.afternoonStart);
+      getLateMinutes(sessions.afternoonIn, schedule.afternoonStart) +
+      (hasNightShift ? getLateMinutes(sessions.nightIn, schedule.nightStart) : 0);
   const earlyLeaveMinutes = isFullDayLeave
     ? 0
     : getEarlyLeaveMinutes(sessions.morningOut, schedule.morningEnd) +
-      getEarlyLeaveMinutes(sessions.afternoonOut, schedule.afternoonEnd);
-  const overtimeMinutes =
-    sessions.afternoonOut === null || isFullDayLeave ? 0 : Math.max(0, sessions.afternoonOut - schedule.afternoonEnd);
+      getEarlyLeaveMinutes(sessions.afternoonOut, schedule.afternoonEnd) +
+      (hasNightShift ? getEarlyLeaveMinutes(sessions.nightOut, schedule.nightEnd) : 0);
+  const overtimeCheckOut = hasNightShift ? sessions.nightOut : sessions.afternoonOut;
+  const overtimeEnd = hasNightShift ? schedule.nightEnd : schedule.afternoonEnd;
+  const overtimeMinutes = overtimeCheckOut === null || isFullDayLeave ? 0 : Math.max(0, overtimeCheckOut - overtimeEnd);
 
   return {
     hasData,
@@ -1173,6 +1264,8 @@ function parseAttendanceCell(
       morningOut: sessions.morningOut === null ? undefined : formatMinutes(sessions.morningOut),
       afternoonIn: sessions.afternoonIn === null ? undefined : formatMinutes(sessions.afternoonIn),
       afternoonOut: sessions.afternoonOut === null ? undefined : formatMinutes(sessions.afternoonOut),
+      nightIn: sessions.nightIn === null ? undefined : formatMinutes(sessions.nightIn),
+      nightOut: sessions.nightOut === null ? undefined : formatMinutes(sessions.nightOut),
     },
     checkInAt,
     checkOutAt,
@@ -1180,6 +1273,8 @@ function parseAttendanceCell(
     morningCheckOutAt,
     afternoonCheckInAt,
     afternoonCheckOutAt,
+    nightCheckInAt,
+    nightCheckOutAt,
     lateMinutes,
     earlyLeaveMinutes,
     overtimeMinutes,
@@ -1198,12 +1293,18 @@ function buildShiftSessions(times: number[], shiftCount = 2, schedule: ShiftSche
     morningOut: null,
     afternoonIn: null,
     afternoonOut: null,
+    nightIn: null,
+    nightOut: null,
     workDay: 0,
     isMissingPunch: false,
   };
 
   if (times.length === 0) {
     return sessions;
+  }
+
+  if (shiftCount >= 3) {
+    return buildGroupedThreeShiftSessions(times, schedule);
   }
 
   const groupedSessions = buildGroupedTwoShiftSessions(times, schedule);
@@ -1297,8 +1398,30 @@ function buildGroupedTwoShiftSessions(times: number[], schedule: ShiftSchedule):
     morningOut: morningTimes[morningTimes.length - 1] ?? null,
     afternoonIn: afternoonTimes[0] ?? null,
     afternoonOut: afternoonTimes[afternoonTimes.length - 1] ?? null,
+    nightIn: null,
+    nightOut: null,
     workDay: 1,
     isMissingPunch: false,
+  };
+}
+
+function buildGroupedThreeShiftSessions(times: number[], schedule: ShiftSchedule): ShiftSessions {
+  const morningTimes = times.filter((time) => time < schedule.lunchSplit);
+  const afternoonTimes = times.filter((time) => time >= schedule.lunchSplit && time < schedule.dinnerSplit);
+  const nightTimes = times.filter((time) => time >= schedule.dinnerSplit);
+  const shiftGroups = [morningTimes, afternoonTimes, nightTimes];
+  const completeShiftCount = shiftGroups.filter((group) => group.length >= 2).length;
+  const partialShiftCount = shiftGroups.filter((group) => group.length === 1).length;
+
+  return {
+    morningIn: morningTimes[0] ?? null,
+    morningOut: morningTimes.length >= 2 ? morningTimes[morningTimes.length - 1] ?? null : null,
+    afternoonIn: afternoonTimes[0] ?? null,
+    afternoonOut: afternoonTimes.length >= 2 ? afternoonTimes[afternoonTimes.length - 1] ?? null : null,
+    nightIn: nightTimes[0] ?? null,
+    nightOut: nightTimes.length >= 2 ? nightTimes[nightTimes.length - 1] ?? null : null,
+    workDay: roundNumber(completeShiftCount / 3 + partialShiftCount / 6),
+    isMissingPunch: completeShiftCount < 3 || partialShiftCount > 0,
   };
 }
 
@@ -1308,6 +1431,8 @@ function buildSingleShiftSession(times: number[]): ShiftSessions {
     morningOut: null,
     afternoonIn: null,
     afternoonOut: null,
+    nightIn: null,
+    nightOut: null,
     workDay: 0,
     isMissingPunch: false,
   };
@@ -1351,6 +1476,14 @@ function validateAttendanceSettings(settings: AttendanceSettingsDto) {
   if (schedule.morningEnd > schedule.afternoonStart) {
     throw new HttpError(400, "INVALID_ATTENDANCE_SETTINGS", "Giờ ra ca sáng phải nhỏ hơn hoặc bằng giờ vào ca chiều");
   }
+
+  if (schedule.afternoonEnd > schedule.nightStart) {
+    throw new HttpError(400, "INVALID_ATTENDANCE_SETTINGS", "Giờ ra ca chiều phải nhỏ hơn hoặc bằng giờ vào ca tối");
+  }
+
+  if (schedule.nightStart >= schedule.nightEnd) {
+    throw new HttpError(400, "INVALID_ATTENDANCE_SETTINGS", "Giờ vào ca tối phải nhỏ hơn giờ ra ca tối");
+  }
 }
 
 function toShiftSchedule(settings: AttendanceSettingsDto): ShiftSchedule {
@@ -1358,13 +1491,18 @@ function toShiftSchedule(settings: AttendanceSettingsDto): ShiftSchedule {
   const morningEnd = timeToMinutes(settings.morningEnd);
   const afternoonStart = timeToMinutes(settings.afternoonStart);
   const afternoonEnd = timeToMinutes(settings.afternoonEnd);
+  const nightStart = timeToMinutes(settings.nightStart);
+  const nightEnd = timeToMinutes(settings.nightEnd);
 
   return {
     morningStart,
     morningEnd,
     afternoonStart,
     afternoonEnd,
+    nightStart,
+    nightEnd,
     lunchSplit: Math.round((morningEnd + afternoonStart) / 2),
+    dinnerSplit: Math.round((afternoonEnd + nightStart) / 2),
     noLunchPunchMorningLimit: Math.round((morningStart + morningEnd) / 2),
     noLunchPunchAfternoonLimit: Math.round((afternoonStart + afternoonEnd) / 2),
   };
@@ -1406,10 +1544,28 @@ function addEmployeeToMap(
   employee: Employee,
 ) {
   map.byCode.set(normalizeKey(employee.employeeCode), employee);
+  const loginStyleCode = toLoginStyleEmployeeCode(employee.employeeCode);
+  if (loginStyleCode) {
+    map.byCode.set(normalizeKey(loginStyleCode), employee);
+  }
+
   if (employee.timekeepingCode) {
     map.byCode.set(normalizeKey(employee.timekeepingCode), employee);
+    const loginStyleTimekeepingCode = toLoginStyleEmployeeCode(employee.timekeepingCode);
+    if (loginStyleTimekeepingCode) {
+      map.byCode.set(normalizeKey(loginStyleTimekeepingCode), employee);
+    }
   }
   map.byName.set(normalizeKey(employee.fullName), employee);
+}
+
+function toLoginStyleEmployeeCode(value: string) {
+  if (/^\d{1,3}$/.test(value.trim())) {
+    return `DLE${String(Number(value)).padStart(3, "0")}`;
+  }
+
+  const loginCode = value.trim().match(/^DLE0*(\d{1,3})$/i);
+  return loginCode ? String(Number(loginCode[1])) : null;
 }
 
 function getAttendanceKey(employeeId: string, workDate: string) {
@@ -1462,6 +1618,8 @@ function buildManualAttendanceValue(rowInput: UpdateAttendanceSummaryRowDto) {
     rowInput.morningCheckOut,
     rowInput.afternoonCheckIn,
     rowInput.afternoonCheckOut,
+    rowInput.nightCheckIn,
+    rowInput.nightCheckOut,
   ]
     .filter((value): value is string => Boolean(value))
     .join("\n");
@@ -1497,6 +1655,39 @@ function roundNumber(value: number) {
 
 function roundCurrency(value: number) {
   return Math.round(value);
+}
+
+function filterAttendanceRow<TRecord extends Record<string, unknown>>(
+  record: TRecord,
+  visibleColumns: AttendanceEmployeeViewColumn[],
+) {
+  const visibleSet = new Set<string>(visibleColumns);
+  const filteredRecord: Record<string, unknown> = {
+    id: record.id,
+    employeeId: record.employeeId,
+  };
+
+  for (const column of attendanceEmployeeViewColumns) {
+    if (visibleSet.has(column)) {
+      filteredRecord[column] = record[column];
+    }
+  }
+
+  return filteredRecord;
+}
+
+function filterAttendanceTotals<TTotals extends Record<string, unknown>>(
+  totals: TTotals,
+  visibleColumns: AttendanceEmployeeViewColumn[],
+) {
+  const visibleSet = new Set<string>(visibleColumns);
+  return {
+    rows: totals.rows,
+    workDay: visibleSet.has("workDay") ? totals.workDay : undefined,
+    lateMinutes: visibleSet.has("lateMinutes") ? totals.lateMinutes : undefined,
+    earlyLeaveMinutes: visibleSet.has("earlyLeaveMinutes") ? totals.earlyLeaveMinutes : undefined,
+    overtimeMinutes: visibleSet.has("overtimeMinutes") ? totals.overtimeMinutes : undefined,
+  };
 }
 
 function countStandardWorkDays(month: number, year: number) {

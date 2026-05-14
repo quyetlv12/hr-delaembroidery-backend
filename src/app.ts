@@ -8,6 +8,7 @@ import { authRoutes } from "./modules/auth/auth.routes";
 import { attendanceRoutes } from "./modules/attendance/attendance.routes";
 import { bankTransferRoutes } from "./modules/bank-transfer/bank-transfer.routes";
 import { dashboardRoutes } from "./modules/dashboard/dashboard.routes";
+import { employeeViewSettingsRoutes } from "./modules/employee-view-settings/employee-view-settings.routes";
 import { employeeRoutes } from "./modules/employees/employee.routes";
 import { organizationRoutes } from "./modules/organization/organization.routes";
 import { payrollRoutes } from "./modules/payroll/payroll.routes";
@@ -31,6 +32,7 @@ export function createApp() {
   app.use(`${env.API_PREFIX}/auth`, authRoutes);
   app.use(`${env.API_PREFIX}/dashboard`, dashboardRoutes);
   app.use(`${env.API_PREFIX}/employees`, employeeRoutes);
+  app.use(`${env.API_PREFIX}/employee-view-settings`, employeeViewSettingsRoutes);
   app.use(`${env.API_PREFIX}/organization`, organizationRoutes);
   app.use(`${env.API_PREFIX}/attendance`, attendanceRoutes);
   app.use(`${env.API_PREFIX}/payroll`, payrollRoutes);

@@ -103,8 +103,46 @@ export class EmployeeRepository {
     return this.findById(savedEmployee.id);
   }
 
-  softDelete(id: string) {
-    return this.repository.softDelete(id);
+  async softDelete(id: string) {
+    return AppDataSource.transaction(async (manager) => {
+      const employee = await manager.getRepository(Employee).findOne({
+        where: { id },
+        relations: { user: true },
+      });
+      if (!employee) {
+        return { affected: 0 };
+      }
+
+      const deletedAt = new Date();
+      const suffix = deletedAt.getTime().toString(36);
+      await this.softDeleteEmployeeData(manager, id);
+
+      if (employee.user) {
+        await manager.query("DELETE FROM `user_roles` WHERE `user_id` = ?", [employee.user.id]);
+        await manager.query(
+          "UPDATE `users` SET `login_code` = ?, `email` = ?, `is_active` = 0, `deleted_at` = ? WHERE `id` = ?",
+          [
+            await this.generateDeletedLoginCode(manager),
+            buildDeletedEmail(employee.user.email, suffix),
+            deletedAt,
+            employee.user.id,
+          ],
+        );
+      }
+
+      await manager.query(
+        "UPDATE `employees` SET `employee_code` = ?, `timekeeping_code` = ?, `email` = ?, `status` = 'inactive', `user_id` = NULL, `deleted_at` = ? WHERE `id` = ?",
+        [
+          buildDeletedCode(employee.employeeCode, suffix),
+          employee.timekeepingCode ? buildDeletedCode(employee.timekeepingCode, suffix) : null,
+          buildDeletedEmail(employee.email, suffix),
+          deletedAt,
+          id,
+        ],
+      );
+
+      return { affected: 1 };
+    });
   }
 
   async getFormOptions() {
@@ -237,10 +275,84 @@ export class EmployeeRepository {
 
     return fallbackToGenerated ? generateLoginCode(this.userRepository) : null;
   }
+
+  private async softDeleteEmployeeData(manager: typeof AppDataSource.manager, employeeId: string) {
+    const deletedAt = new Date();
+    await softDeleteTableRows(manager, "bank_accounts", "`employeeId` = ?", [employeeId], deletedAt);
+    await softDeleteTableRows(manager, "attendance_logs", "`employeeId` = ?", [employeeId], deletedAt);
+    await softDeleteTableRows(manager, "attendance_summary", "`employeeId` = ?", [employeeId], deletedAt);
+    await softDeleteTableRows(manager, "employee_documents", "`employeeId` = ?", [employeeId], deletedAt);
+    await softDeleteTableRows(manager, "allowances", "`employeeId` = ?", [employeeId], deletedAt);
+    await softDeleteTableRows(manager, "deductions", "`employeeId` = ?", [employeeId], deletedAt);
+
+    if (await tableExists(manager, "salary_records")) {
+      const salaryRecords = (await manager.query("SELECT `id` FROM `salary_records` WHERE `employeeId` = ?", [
+        employeeId,
+      ])) as Array<{ id: string }>;
+      const salaryRecordIds = salaryRecords.map((record) => record.id);
+      if (salaryRecordIds.length > 0) {
+        await softDeleteTableRows(
+          manager,
+          "salary_email_logs",
+          "`salaryRecordId` IN (?)",
+          [salaryRecordIds],
+          deletedAt,
+        );
+        await softDeleteTableRows(
+          manager,
+          "salary_details",
+          "`salaryRecordId` IN (?)",
+          [salaryRecordIds],
+          deletedAt,
+        );
+      }
+      await softDeleteTableRows(manager, "salary_records", "`employeeId` = ?", [employeeId], deletedAt);
+    }
+  }
+
+  private async generateDeletedLoginCode(manager: typeof AppDataSource.manager) {
+    for (let index = 0; index < 100; index += 1) {
+      const code = `X${Math.random().toString(36).slice(2, 7).toUpperCase()}`.slice(0, 6);
+      const existing = (await manager.query("SELECT `id` FROM `users` WHERE `login_code` = ? LIMIT 1", [code])) as unknown[];
+      if (existing.length === 0) {
+        return code;
+      }
+    }
+
+    return `X${Date.now().toString(36).slice(-5).toUpperCase()}`.slice(0, 6);
+  }
 }
 
 function mergeRoles(currentRoles: Role[] = [], role: Role) {
   const roleMap = new Map(currentRoles.map((currentRole) => [currentRole.id, currentRole]));
   roleMap.set(role.id, role);
   return Array.from(roleMap.values());
+}
+
+async function softDeleteTableRows(
+  manager: typeof AppDataSource.manager,
+  tableName: string,
+  whereClause: string,
+  parameters: unknown[],
+  deletedAt: Date,
+) {
+  if (!(await tableExists(manager, tableName))) {
+    return;
+  }
+
+  await manager.query(`UPDATE \`${tableName}\` SET \`deleted_at\` = ? WHERE ${whereClause}`, [deletedAt, ...parameters]);
+}
+
+async function tableExists(manager: typeof AppDataSource.manager, tableName: string) {
+  const rows = (await manager.query("SHOW TABLES LIKE ?", [tableName])) as unknown[];
+  return rows.length > 0;
+}
+
+function buildDeletedCode(value: string, suffix: string) {
+  return `DEL-${suffix}-${value}`.slice(0, 50);
+}
+
+function buildDeletedEmail(value: string, suffix: string) {
+  const [localPart, domain = "deleted.local"] = value.split("@");
+  return `deleted-${suffix}-${localPart}@${domain}`.slice(0, 180);
 }

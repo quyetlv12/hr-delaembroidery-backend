@@ -14,6 +14,35 @@ const EMPLOYER_INSURANCE_RATE =
   EMPLOYER_SOCIAL_INSURANCE_RATE + EMPLOYER_HEALTH_INSURANCE_RATE + EMPLOYER_UNEMPLOYMENT_INSURANCE_RATE;
 const HOURS_PER_WORK_DAY = 8;
 
+export type PayrollFormulaCategoryInput = {
+  key: string;
+  name: string;
+  formula: string;
+};
+
+type PayrollFormulaCategoryResult = PayrollFormulaCategoryInput & {
+  amount: number;
+  type: "earning" | "deduction";
+};
+
+const DEFAULT_EARNING_CATEGORIES: PayrollFormulaCategoryInput[] = [
+  { key: "luongCoDinh", name: "Lương cố định", formula: "baoHiemNgay" },
+  { key: "trachNhiem", name: "Trách nhiệm", formula: "phuCapTrachNhiem / ngayCong" },
+  { key: "anCa", name: "Ăn ca", formula: "phuCapAnCa / ngayCong" },
+  { key: "dienThoai", name: "Điện thoại", formula: "phuCapDienThoai / ngayCong" },
+  {
+    key: "kpi",
+    name: "KPI",
+    formula: "(luongNgayThucHuong - baoHiemNgay) + (phuCapKpi + phuCapKhac + thuongLe) / ngayCong",
+  },
+];
+
+const DEFAULT_DEDUCTION_CATEGORIES: PayrollFormulaCategoryInput[] = [
+  { key: "bhxhNhanVien", name: "BHXH NLĐ", formula: "luongBHXH * tyLeBHXHNLD / 100" },
+  { key: "thueTNCN", name: "Thuế TNCN", formula: "khauTruThue" },
+  { key: "tamUng", name: "Tạm ứng", formula: "tamUng" },
+];
+
 type PayrollFormulaInput = {
   actualSalary: number;
   workDay: number;
@@ -22,6 +51,16 @@ type PayrollFormulaInput = {
   overtimeRate: number;
   holidayBonusTotal?: number;
   insuranceSalary?: number;
+  employeeInsuranceRate?: number;
+  employerInsuranceRate?: number;
+  formulas?: {
+    dailySalaryFormula?: string;
+    grossSalaryFormula?: string;
+    deductionFormula?: string;
+    netSalaryFormula?: string;
+    earningCategories?: PayrollFormulaCategoryInput[];
+    deductionCategories?: PayrollFormulaCategoryInput[];
+  };
   allowances?: Pick<Allowance, "name" | "amount">[];
   deductions?: Pick<Deduction, "name" | "amount">[];
 };
@@ -59,6 +98,7 @@ export type PayrollFormulaResult = {
   advanceTotal: number;
   totalDeduction: number;
   netSalary: number;
+  categoryDetails: PayrollFormulaCategoryResult[];
 };
 
 export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormulaResult {
@@ -66,40 +106,132 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
   const workDay = roundNumber(input.workDay);
   const standardWorkDay = input.standardWorkDay > 0 ? roundNumber(input.standardWorkDay) : 0;
   const insuranceSalary = sanitizeMoney(input.insuranceSalary ?? (actualSalary > 0 ? DEFAULT_INSURANCE_SALARY : 0));
+  const employeeInsuranceRate = normalizeRate(input.employeeInsuranceRate, EMPLOYEE_INSURANCE_RATE);
+  const employerInsuranceRate = normalizeRate(input.employerInsuranceRate, EMPLOYER_INSURANCE_RATE);
+  const employeeInsurancePercent = normalizePercentValue(input.employeeInsuranceRate, EMPLOYEE_INSURANCE_RATE);
+  const employerInsurancePercent = normalizePercentValue(input.employerInsuranceRate, EMPLOYER_INSURANCE_RATE);
   const bonusTotal = roundCurrency(input.holidayBonusTotal ?? 0);
   const allowances = splitAllowances(input.allowances ?? []);
   const deductions = splitDeductions(input.deductions ?? []);
 
   const dailyActualSalary = standardWorkDay > 0 ? actualSalary / standardWorkDay : 0;
-  const fixedDailySalary = standardWorkDay > 0 ? insuranceSalary / standardWorkDay : 0;
-  const responsibilityAllowance = toDailyAmount(allowances.responsibility, workDay);
-  const mealAllowance = toDailyAmount(allowances.meal, workDay);
-  const phoneAllowance = toDailyAmount(allowances.phone, workDay);
-  const baseKpiAllowance = Math.max(0, dailyActualSalary - fixedDailySalary);
-  const kpiAllowance =
-    baseKpiAllowance + toDailyAmount(allowances.kpi + allowances.other + bonusTotal, workDay);
-  const dailyTotal = fixedDailySalary + responsibilityAllowance + mealAllowance + phoneAllowance + kpiAllowance;
+  const fixedDailySalaryFallback = standardWorkDay > 0 ? insuranceSalary / standardWorkDay : 0;
+  const payrollVariables = {
+    thucHuong: actualSalary,
+    luongBHXH: insuranceSalary,
+    congChuan: standardWorkDay,
+    ngayCong: workDay,
+    baoHiemNgay: fixedDailySalaryFallback,
+    luongNgayThucHuong: dailyActualSalary,
+    phuCapTrachNhiem: allowances.responsibility,
+    phuCapAnCa: allowances.meal,
+    phuCapDienThoai: allowances.phone,
+    phuCapKpi: allowances.kpi,
+    phuCapKhac: allowances.other,
+    phuCap: allowances.total,
+    thuongLe: bonusTotal,
+    soGioTangCa: input.overtimeMinutes / 60,
+    heSoOT: input.overtimeRate,
+    tyLeBHXHNLD: employeeInsurancePercent,
+    tyLeBHXHCongTy: employerInsurancePercent,
+    khauTruThue: deductions.tax,
+    tamUng: deductions.advance,
+  };
+  const earningCategories = input.formulas?.earningCategories ?? DEFAULT_EARNING_CATEGORIES;
+  const earningValues = evaluateFormulaCategories(earningCategories, payrollVariables);
+  const fixedDailySalary = getFormulaValue(earningValues, "luongCoDinh", fixedDailySalaryFallback);
+  const responsibilityAllowance = getFormulaValue(earningValues, "trachNhiem", 0);
+  const mealAllowance = getFormulaValue(earningValues, "anCa", 0);
+  const phoneAllowance = getFormulaValue(earningValues, "dienThoai", 0);
+  const kpiAllowance = getFormulaValue(earningValues, "kpi", 0);
+  const dailyTotal = roundCurrency(
+    evaluateFormula(
+      input.formulas?.dailySalaryFormula,
+      sumFormulaValues(earningValues),
+      {
+        ...payrollVariables,
+        ...earningValues,
+      },
+    ),
+  );
   const overtimeWorkDay = roundNumber(input.overtimeMinutes / 60 / HOURS_PER_WORK_DAY);
   const totalWorkDay = roundNumber(workDay + overtimeWorkDay);
   const hourlyRate = dailyActualSalary / HOURS_PER_WORK_DAY;
   const earnedSalary = roundCurrency(dailyTotal * workDay);
   const overtimeSalary = roundCurrency((input.overtimeMinutes / 60) * hourlyRate * input.overtimeRate);
-  const grossSalary = roundCurrency(earnedSalary + overtimeSalary);
+  const grossSalary = roundCurrency(
+    evaluateFormula(input.formulas?.grossSalaryFormula, earnedSalary + overtimeSalary, {
+      ...payrollVariables,
+      ...earningValues,
+      luongNgay: dailyTotal,
+      tongLuongNgay: dailyTotal,
+      luongCong: earnedSalary,
+      luongThang: earnedSalary,
+      luongTrongThang: earnedSalary,
+      luongTangCa: overtimeSalary,
+    }),
+  );
 
   const employerSocialInsurance = roundCurrency(insuranceSalary * EMPLOYER_SOCIAL_INSURANCE_RATE);
   const employerHealthInsurance = roundCurrency(insuranceSalary * EMPLOYER_HEALTH_INSURANCE_RATE);
   const employerUnemploymentInsurance = roundCurrency(insuranceSalary * EMPLOYER_UNEMPLOYMENT_INSURANCE_RATE);
-  const employerInsuranceTotal = roundCurrency(insuranceSalary * EMPLOYER_INSURANCE_RATE);
+  const employerInsuranceTotal = roundCurrency(insuranceSalary * employerInsuranceRate);
   const employeeSocialInsurance = roundCurrency(insuranceSalary * EMPLOYEE_SOCIAL_INSURANCE_RATE);
   const employeeHealthInsurance = roundCurrency(insuranceSalary * EMPLOYEE_HEALTH_INSURANCE_RATE);
   const employeeUnemploymentInsurance = roundCurrency(insuranceSalary * EMPLOYEE_UNEMPLOYMENT_INSURANCE_RATE);
-  const employeeInsuranceTotal = roundCurrency(insuranceSalary * EMPLOYEE_INSURANCE_RATE);
-  const totalInsurance = roundCurrency(employerInsuranceTotal + employeeInsuranceTotal);
-  const personalIncomeTax = roundCurrency(deductions.tax);
-  const advanceTotal = roundCurrency(deductions.advance);
+  const defaultEmployeeInsuranceTotal = roundCurrency(insuranceSalary * employeeInsuranceRate);
+  const deductionCategories = input.formulas?.deductionCategories ?? DEFAULT_DEDUCTION_CATEGORIES;
+  const deductionValues = evaluateFormulaCategories(deductionCategories, {
+    ...payrollVariables,
+    ...earningValues,
+    luongNgay: dailyTotal,
+    tongLuongNgay: dailyTotal,
+    luongCong: earnedSalary,
+    luongThang: earnedSalary,
+    luongTrongThang: earnedSalary,
+    luongTangCa: overtimeSalary,
+    tongLuong: grossSalary,
+    bhxhCongTy: employerInsuranceTotal,
+    bhxhNhanVien: defaultEmployeeInsuranceTotal,
+  });
+  const employeeInsuranceTotal = getFormulaValue(deductionValues, "bhxhNhanVien", defaultEmployeeInsuranceTotal);
+  const personalIncomeTax = getFormulaValue(deductionValues, "thueTNCN", roundCurrency(deductions.tax));
+  const advanceTotal = getFormulaValue(deductionValues, "tamUng", roundCurrency(deductions.advance));
   const employeeInsuranceDeduction = employeeInsuranceTotal;
-  const totalDeduction = roundCurrency(employeeInsuranceDeduction + personalIncomeTax + advanceTotal);
-  const netSalary = roundCurrency(grossSalary - totalDeduction);
+  const totalInsurance = roundCurrency(employerInsuranceTotal + employeeInsuranceTotal);
+  const totalDeduction = roundCurrency(
+    evaluateFormula(input.formulas?.deductionFormula, sumFormulaValues(deductionValues), {
+      ...payrollVariables,
+      ...earningValues,
+      ...deductionValues,
+      tongLuong: grossSalary,
+      bhxhCongTy: employerInsuranceTotal,
+    }),
+  );
+  const netSalary = roundCurrency(
+    evaluateFormula(input.formulas?.netSalaryFormula, grossSalary - totalDeduction, {
+      ...payrollVariables,
+      ...earningValues,
+      ...deductionValues,
+      tongLuong: grossSalary,
+      tongGiamTru: totalDeduction,
+      luongThang: earnedSalary,
+      luongTrongThang: earnedSalary,
+      luongTangCa: overtimeSalary,
+    }),
+  );
+  const categoryDetails = [
+    ...earningCategories.map((category) => ({
+      ...category,
+      amount: getFormulaValue(earningValues, category.key, 0),
+      type: "earning" as const,
+    })),
+    ...deductionCategories.map((category) => ({
+      ...category,
+      amount: getFormulaValue(deductionValues, category.key, 0),
+      type: "deduction" as const,
+    })),
+  ];
 
   return {
     actualSalary,
@@ -134,6 +266,7 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
     advanceTotal,
     totalDeduction,
     netSalary,
+    categoryDetails,
   };
 }
 
@@ -199,16 +332,188 @@ function splitDeductions(deductions: Pick<Deduction, "name" | "amount">[]) {
   return result;
 }
 
-function toDailyAmount(amount: number, workDay: number) {
-  if (amount <= 0 || workDay <= 0) {
-    return 0;
-  }
-
-  return amount / workDay;
-}
-
 function sanitizeMoney(value: number) {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function normalizeRate(value: number | undefined, fallback: number) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  const numericValue = Number(value);
+  return numericValue > 1 ? numericValue / 100 : numericValue;
+}
+
+function normalizePercentValue(value: number | undefined, fallbackRate: number) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return fallbackRate * 100;
+  }
+
+  return numericValue > 1 ? numericValue : numericValue * 100;
+}
+
+function evaluateFormulaCategories(
+  categories: PayrollFormulaCategoryInput[],
+  variables: Record<string, number>,
+) {
+  const values: Record<string, number> = {};
+
+  for (const category of categories) {
+    const key = normalizeFormulaKey(category.key);
+    if (!key) {
+      continue;
+    }
+
+    values[key] = roundCurrency(evaluateFormula(category.formula, 0, { ...variables, ...values }));
+  }
+
+  return values;
+}
+
+function normalizeFormulaKey(value: string) {
+  const trimmedValue = value.trim();
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedValue) ? trimmedValue : "";
+}
+
+function getFormulaValue(values: Record<string, number>, key: string, fallback: number) {
+  const value = values[key];
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function sumFormulaValues(values: Record<string, number>) {
+  return Object.values(values).reduce((total, value) => total + value, 0);
+}
+
+function evaluateFormula(expression: string | undefined, fallback: number, variables: Record<string, number>) {
+  const normalizedExpression = normalizeFormulaExpression(expression);
+  if (!normalizedExpression) {
+    return fallback;
+  }
+
+  try {
+    const result = parseFormulaExpression(normalizedExpression, variables);
+    return Number.isFinite(result) ? result : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeFormulaExpression(expression: string | undefined) {
+  const trimmedExpression = expression?.trim();
+  if (!trimmedExpression) {
+    return "";
+  }
+
+  const equalIndex = trimmedExpression.indexOf("=");
+  return equalIndex >= 0 ? trimmedExpression.slice(equalIndex + 1).trim() : trimmedExpression;
+}
+
+function parseFormulaExpression(expression: string, variables: Record<string, number>) {
+  let index = 0;
+
+  function skipSpaces() {
+    while (/\s/.test(expression[index] ?? "")) {
+      index += 1;
+    }
+  }
+
+  function parseExpression(): number {
+    let value = parseTerm();
+    while (true) {
+      skipSpaces();
+      const operator = expression[index];
+      if (operator !== "+" && operator !== "-") {
+        return value;
+      }
+      index += 1;
+      const rightValue = parseTerm();
+      value = operator === "+" ? value + rightValue : value - rightValue;
+    }
+  }
+
+  function parseTerm(): number {
+    let value = parseFactor();
+    while (true) {
+      skipSpaces();
+      const operator = expression[index];
+      if (operator !== "*" && operator !== "/") {
+        return value;
+      }
+      index += 1;
+      const rightValue = parseFactor();
+      value = operator === "*" ? value * rightValue : value / rightValue;
+    }
+  }
+
+  function parseFactor(): number {
+    skipSpaces();
+    const character = expression[index];
+
+    if (character === "+") {
+      index += 1;
+      return parseFactor();
+    }
+
+    if (character === "-") {
+      index += 1;
+      return -parseFactor();
+    }
+
+    if (character === "(") {
+      index += 1;
+      const value = parseExpression();
+      skipSpaces();
+      if (expression[index] !== ")") {
+        throw new Error("Invalid formula");
+      }
+      index += 1;
+      return value;
+    }
+
+    if (/[0-9.]/.test(character ?? "")) {
+      return parseNumber();
+    }
+
+    if (/[A-Za-z_]/.test(character ?? "")) {
+      return parseVariable();
+    }
+
+    throw new Error("Invalid formula");
+  }
+
+  function parseNumber() {
+    const startIndex = index;
+    while (/[0-9.]/.test(expression[index] ?? "")) {
+      index += 1;
+    }
+    const value = Number(expression.slice(startIndex, index));
+    if (!Number.isFinite(value)) {
+      throw new Error("Invalid formula");
+    }
+    return value;
+  }
+
+  function parseVariable() {
+    const startIndex = index;
+    while (/[A-Za-z0-9_]/.test(expression[index] ?? "")) {
+      index += 1;
+    }
+    const name = expression.slice(startIndex, index);
+    if (!(name in variables)) {
+      throw new Error("Invalid formula");
+    }
+    return variables[name];
+  }
+
+  const result = parseExpression();
+  skipSpaces();
+  if (index !== expression.length) {
+    throw new Error("Invalid formula");
+  }
+
+  return result;
 }
 
 function normalizeText(value: string) {

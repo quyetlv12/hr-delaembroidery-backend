@@ -18,6 +18,8 @@ export const updateAttendanceSummariesDto = z.object({
         morningCheckOut: optionalTime,
         afternoonCheckIn: optionalTime,
         afternoonCheckOut: optionalTime,
+        nightCheckIn: optionalTime,
+        nightCheckOut: optionalTime,
       }),
     )
     .min(1),
@@ -30,6 +32,8 @@ export const attendanceSettingsDto = z.object({
   morningEnd: timeSetting,
   afternoonStart: timeSetting,
   afternoonEnd: timeSetting,
+  nightStart: timeSetting,
+  nightEnd: timeSetting,
   overtimeRate: z.coerce
     .number()
     .min(0, "Hệ số lương OT phải lớn hơn hoặc bằng 0")

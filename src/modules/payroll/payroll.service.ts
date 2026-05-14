@@ -10,16 +10,47 @@ import {
   AttendanceSummary,
   Deduction,
   Employee,
+  PayrollFormulaSetting,
   SalaryDetail,
   SalaryPeriod,
   SalaryRecord,
 } from "../../entities";
+import {
+  payrollEmployeeViewColumns,
+  type PayrollEmployeeViewColumn,
+} from "../employee-view-settings/employee-view-settings.constants";
+import { EmployeeViewSettingsService } from "../employee-view-settings/employee-view-settings.service";
 import { calculateExcelPayroll, DEFAULT_INSURANCE_SALARY } from "./payroll-formula";
-import type { PayrollPeriodDto } from "./payroll.dto";
+import type { PayrollFormulaSettingDto, PayrollPeriodDto } from "./payroll.dto";
 
 const DEFAULT_OVERTIME_RATE = 1.5;
 const DEFAULT_TRANSFER_DEBIT_ACCOUNT = "111003013254";
 const DEFAULT_TRANSFER_BANK_CODE = "79321001";
+const DEFAULT_FORMULA_SETTING: PayrollFormulaSettingDto = {
+  insuranceBaseSalary: DEFAULT_INSURANCE_SALARY,
+  employeeInsuranceRate: 10.5,
+  employerInsuranceRate: 21.5,
+  earningCategories: [
+    { key: "luongCoDinh", name: "Lương cố định", formula: "baoHiemNgay" },
+    { key: "trachNhiem", name: "Trách nhiệm", formula: "phuCapTrachNhiem / ngayCong" },
+    { key: "anCa", name: "Ăn ca", formula: "phuCapAnCa / ngayCong" },
+    { key: "dienThoai", name: "Điện thoại", formula: "phuCapDienThoai / ngayCong" },
+    {
+      key: "kpi",
+      name: "KPI",
+      formula: "(luongNgayThucHuong - baoHiemNgay) + (phuCapKpi + phuCapKhac + thuongLe) / ngayCong",
+    },
+  ],
+  deductionCategories: [
+    { key: "bhxhNhanVien", name: "BHXH NLĐ", formula: "luongBHXH * tyLeBHXHNLD / 100" },
+    { key: "thueTNCN", name: "Thuế TNCN", formula: "khauTruThue" },
+    { key: "tamUng", name: "Tạm ứng", formula: "tamUng" },
+  ],
+  dailySalaryFormula: "luongCoDinh + trachNhiem + anCa + dienThoai + kpi",
+  grossSalaryFormula: "luongThang + luongTangCa",
+  deductionFormula: "bhxhNhanVien + thueTNCN + tamUng",
+  netSalaryFormula: "tongLuong - tongGiamTru",
+};
 
 export class PayrollService {
   private readonly attendanceRepository = AppDataSource.getRepository(AttendanceSummary);
@@ -31,6 +62,8 @@ export class PayrollService {
   private readonly periodRepository = AppDataSource.getRepository(SalaryPeriod);
   private readonly recordRepository = AppDataSource.getRepository(SalaryRecord);
   private readonly detailRepository = AppDataSource.getRepository(SalaryDetail);
+  private readonly formulaSettingRepository = AppDataSource.getRepository(PayrollFormulaSetting);
+  private readonly employeeViewSettingsService = new EmployeeViewSettingsService();
 
   async list(dto: PayrollPeriodDto, employeeId?: string) {
     const period = await this.findPeriod(dto.month, dto.year);
@@ -43,10 +76,17 @@ export class PayrollService {
     }
 
     const records = await this.findRecords(period.id, employeeId);
+    const visibleColumns = employeeId
+      ? (await this.employeeViewSettingsService.getSettings()).payrollColumns
+      : [...payrollEmployeeViewColumns];
+    const recordDtos = records.map((record) => this.toRecordDto(record));
+    const totals = this.getTotals(records);
+
     return {
       period: this.toPeriodDto(period),
-      records: records.map((record) => this.toRecordDto(record)),
-      totals: this.getTotals(records),
+      records: employeeId ? recordDtos.map((record) => filterPayrollRecord(record, visibleColumns)) : recordDtos,
+      totals: employeeId ? filterPayrollTotals(totals, visibleColumns) : totals,
+      visibleColumns,
     };
   }
 
@@ -72,6 +112,7 @@ export class PayrollService {
     const standardWorkDay = monthSetting.standardWorkDay;
     const holidayBonusTotal = monthSetting.holidayBonusTotal;
     const overtimeRate = await this.getOvertimeRate();
+    const formulaSetting = await this.getFormulaSetting();
 
     for (const employee of employees.filter((item) => summariesByEmployee.has(item.id))) {
       const employeeSummaries = summariesByEmployee.get(employee.id) ?? [];
@@ -87,10 +128,42 @@ export class PayrollService {
         holidayBonusTotal,
         holidayPaidDays: monthSetting.holidayPaidDays,
         overtimeRate,
+        formulaSetting,
       });
     }
 
     return this.list(dto);
+  }
+
+  async getFormulaSetting() {
+    const setting = await this.formulaSettingRepository.findOne({
+      where: {},
+      order: { createdAt: "ASC" },
+    });
+
+    return setting ? this.toFormulaSettingDto(setting) : DEFAULT_FORMULA_SETTING;
+  }
+
+  async updateFormulaSetting(dto: PayrollFormulaSettingDto) {
+    const existing = await this.formulaSettingRepository.findOne({
+      where: {},
+      order: { createdAt: "ASC" },
+    });
+    const setting = existing ?? this.formulaSettingRepository.create();
+    this.formulaSettingRepository.merge(setting, {
+      insuranceBaseSalary: String(dto.insuranceBaseSalary),
+      employeeInsuranceRate: String(dto.employeeInsuranceRate),
+      employerInsuranceRate: String(dto.employerInsuranceRate),
+      earningCategories: dto.earningCategories,
+      deductionCategories: dto.deductionCategories,
+      dailySalaryFormula: dto.dailySalaryFormula,
+      grossSalaryFormula: dto.grossSalaryFormula,
+      deductionFormula: dto.deductionFormula,
+      netSalaryFormula: dto.netSalaryFormula,
+    });
+
+    const savedSetting = await this.formulaSettingRepository.save(setting);
+    return this.toFormulaSettingDto(savedSetting);
   }
 
   async recalculateUnlockedPeriodsForEmployee(employeeId: string) {
@@ -256,6 +329,7 @@ export class PayrollService {
     holidayBonusTotal: number;
     holidayPaidDays: number;
     overtimeRate: number;
+    formulaSetting: PayrollFormulaSettingDto;
   }) {
     const workDay = sum(input.summaries.map((summary) => Number(summary.workDay)));
     const overtimeMinutes = sum(input.summaries.map((summary) => summary.overtimeMinutes));
@@ -266,6 +340,17 @@ export class PayrollService {
       overtimeMinutes,
       overtimeRate: input.overtimeRate,
       holidayBonusTotal: input.holidayBonusTotal,
+      insuranceSalary: input.formulaSetting.insuranceBaseSalary,
+      employeeInsuranceRate: input.formulaSetting.employeeInsuranceRate,
+      employerInsuranceRate: input.formulaSetting.employerInsuranceRate,
+      formulas: {
+        dailySalaryFormula: input.formulaSetting.dailySalaryFormula,
+        grossSalaryFormula: input.formulaSetting.grossSalaryFormula,
+        deductionFormula: input.formulaSetting.deductionFormula,
+        netSalaryFormula: input.formulaSetting.netSalaryFormula,
+        earningCategories: input.formulaSetting.earningCategories,
+        deductionCategories: input.formulaSetting.deductionCategories,
+      },
       allowances: input.allowances,
       deductions: input.deductions,
     });
@@ -333,7 +418,16 @@ export class PayrollService {
           label: "Tổng lương = Lương trong tháng + Lương làm thêm giờ",
           amount: payrollFormula.grossSalary,
         },
-        { type: "insurance", label: "BHXH NLĐ 10.5%", amount: -payrollFormula.employeeInsuranceDeduction },
+        ...payrollFormula.categoryDetails.map((detail) => ({
+          type: detail.type,
+          label: `${detail.name} = ${detail.formula}`,
+          amount: detail.type === "deduction" ? -detail.amount : detail.amount,
+        })),
+        {
+          type: "insurance",
+          label: `BHXH NLĐ ${formatPercent(input.formulaSetting.employeeInsuranceRate)}`,
+          amount: -payrollFormula.employeeInsuranceDeduction,
+        },
         { type: "tax", label: "Thuế thu nhập cá nhân", amount: -payrollFormula.personalIncomeTax },
         { type: "deduction", label: "Tạm ứng / khấu trừ khác", amount: -payrollFormula.advanceTotal },
         { type: "deduction", label: "Tổng cộng các khoản giảm trừ", amount: -payrollFormula.totalDeduction },
@@ -455,6 +549,7 @@ export class PayrollService {
       advanceTotal: Number(record.advanceTotal),
       deductionTotal: Number(record.deductionTotal),
       netSalary: Number(record.netSalary),
+      dependentNote: getDependentNote(record),
       status: record.status,
       details: record.details?.map((detail) => ({
         id: detail.id,
@@ -462,6 +557,23 @@ export class PayrollService {
         label: detail.label,
         amount: Number(detail.amount),
       })) ?? [],
+    };
+  }
+
+  private toFormulaSettingDto(setting: PayrollFormulaSetting): PayrollFormulaSettingDto {
+    return {
+      insuranceBaseSalary: Number(setting.insuranceBaseSalary),
+      employeeInsuranceRate: Number(setting.employeeInsuranceRate),
+      employerInsuranceRate: Number(setting.employerInsuranceRate),
+      earningCategories: normalizeCategoryList(setting.earningCategories, DEFAULT_FORMULA_SETTING.earningCategories),
+      deductionCategories: normalizeCategoryList(
+        setting.deductionCategories,
+        DEFAULT_FORMULA_SETTING.deductionCategories,
+      ),
+      dailySalaryFormula: setting.dailySalaryFormula || DEFAULT_FORMULA_SETTING.dailySalaryFormula,
+      grossSalaryFormula: setting.grossSalaryFormula || DEFAULT_FORMULA_SETTING.grossSalaryFormula,
+      deductionFormula: setting.deductionFormula || DEFAULT_FORMULA_SETTING.deductionFormula,
+      netSalaryFormula: setting.netSalaryFormula || DEFAULT_FORMULA_SETTING.netSalaryFormula,
     };
   }
 
@@ -522,6 +634,10 @@ export class PayrollService {
 
 function getPrimaryBankAccount(bankAccounts: SalaryRecord["employee"]["bankAccounts"] = []) {
   return bankAccounts.find((bankAccount) => bankAccount.isPrimary) ?? bankAccounts[0];
+}
+
+function getDependentNote(record: SalaryRecord) {
+  return record.details?.find((detail) => detail.label.toLocaleLowerCase("vi-VN").includes("phụ thuộc"))?.label ?? "";
 }
 
 function formatTransferAmount(value: number) {
@@ -587,4 +703,78 @@ function roundCurrency(value: number) {
 
 function roundNumber(value: number) {
   return Math.round(value * 100) / 100;
+}
+
+function normalizeCategoryList(value: unknown, fallback: PayrollFormulaSettingDto["earningCategories"]) {
+  if (!Array.isArray(value)) {
+    return fallback;
+  }
+
+  if (value.every(isFormulaCategory)) {
+    return value.map((item) => ({
+      key: item.key.trim(),
+      name: item.name.trim(),
+      formula: item.formula.trim(),
+    }));
+  }
+
+  if (value.every((item) => typeof item === "string")) {
+    return value.map((item, index) => ({
+      key: fallback[index]?.key ?? `muc${index + 1}`,
+      name: item.trim(),
+      formula: fallback[index]?.formula ?? "0",
+    }));
+  }
+
+  return fallback;
+}
+
+function isFormulaCategory(value: unknown): value is PayrollFormulaSettingDto["earningCategories"][number] {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "key" in value &&
+    "name" in value &&
+    "formula" in value &&
+    typeof value.key === "string" &&
+    typeof value.name === "string" &&
+    typeof value.formula === "string"
+  );
+}
+
+function formatPercent(value: number) {
+  return `${new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 2 }).format(value)}%`;
+}
+
+function filterPayrollRecord<TRecord extends Record<string, unknown>>(
+  record: TRecord,
+  visibleColumns: PayrollEmployeeViewColumn[],
+) {
+  const visibleSet = new Set<string>(visibleColumns);
+  const filteredRecord: Record<string, unknown> = {
+    id: record.id,
+    employeeId: record.employeeId,
+    details: [],
+  };
+
+  for (const column of payrollEmployeeViewColumns) {
+    if (visibleSet.has(column)) {
+      filteredRecord[column] = record[column];
+    }
+  }
+
+  return filteredRecord;
+}
+
+function filterPayrollTotals<TTotals extends Record<string, unknown>>(
+  totals: TTotals,
+  visibleColumns: PayrollEmployeeViewColumn[],
+) {
+  const visibleSet = new Set<string>(visibleColumns);
+  return {
+    employeeCount: totals.employeeCount,
+    workDay: visibleSet.has("workDay") ? totals.workDay : undefined,
+    overtimeTotal: visibleSet.has("overtimeTotal") ? totals.overtimeTotal : undefined,
+    netSalary: visibleSet.has("netSalary") ? totals.netSalary : undefined,
+  };
 }
