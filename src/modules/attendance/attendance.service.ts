@@ -4,27 +4,27 @@ import { Between, In } from "typeorm";
 import { HttpError } from "../../common/http-error";
 import { AppDataSource } from "../../database/data-source";
 import {
-  Allowance,
   AttendanceLog,
   AttendanceMonthSetting,
   AttendanceSetting,
   AttendanceSummary,
-  Deduction,
   Employee,
+  Holiday,
 } from "../../entities";
 import {
   attendanceEmployeeViewColumns,
   type AttendanceEmployeeViewColumn,
 } from "../employee-view-settings/employee-view-settings.constants";
 import { EmployeeViewSettingsService } from "../employee-view-settings/employee-view-settings.service";
-import { calculateExcelPayroll } from "../payroll/payroll-formula";
 import { getMonthRange, PayrollService } from "../payroll/payroll.service";
 import type {
+  AttendanceHolidaySettingsDto,
   AttendanceMonthSettingDto,
   AttendanceSettingsDto,
   UpdateAttendanceSummariesDto,
   UpdateAttendanceSummaryRowDto,
 } from "./attendance.dto";
+import { buildAttendancePayPreviewRecord } from "./attendance-pay-preview";
 
 type ParsedDateColumn = {
   index: number;
@@ -189,8 +189,7 @@ const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettingsDto = {
 };
 export class AttendanceService {
   private readonly employeeRepository = AppDataSource.getRepository(Employee);
-  private readonly allowanceRepository = AppDataSource.getRepository(Allowance);
-  private readonly deductionRepository = AppDataSource.getRepository(Deduction);
+  private readonly holidayRepository = AppDataSource.getRepository(Holiday);
   private readonly logRepository = AppDataSource.getRepository(AttendanceLog);
   private readonly monthSettingRepository = AppDataSource.getRepository(AttendanceMonthSetting);
   private readonly settingRepository = AppDataSource.getRepository(AttendanceSetting);
@@ -255,6 +254,56 @@ export class AttendanceService {
     const savedSettings = await this.monthSettingRepository.save(settings);
     await this.payrollService.recalculatePeriodIfUnlocked(dto.month, dto.year);
     return this.toMonthSettingDto(savedSettings, dto.month, dto.year);
+  }
+
+  async listHolidaySettings(year: number) {
+    validateSettingsYear(year);
+    const { from, to } = getYearRange(year);
+    const holidays = await this.holidayRepository.find({
+      where: { holidayDate: Between(from, to) },
+      order: { holidayDate: "ASC" },
+    });
+
+    return {
+      year,
+      holidays: holidays.map(toHolidayDto),
+    };
+  }
+
+  async updateHolidaySettings(dto: AttendanceHolidaySettingsDto) {
+    validateSettingsYear(dto.year);
+    const holidays = normalizeHolidaySettings(dto.year, dto);
+    const { from, to } = getYearRange(dto.year);
+
+    await AppDataSource.transaction(async (manager) => {
+      const holidayRepository = manager.getRepository(Holiday);
+      await holidayRepository
+        .createQueryBuilder()
+        .delete()
+        .where("holiday_date BETWEEN :from AND :to", { from, to })
+        .execute();
+
+      if (holidays.length === 0) {
+        return;
+      }
+
+      await holidayRepository.save(
+        holidays.map((holiday) =>
+          holidayRepository.create({
+            holidayDate: holiday.date,
+            name: `Ngày lễ ${formatDisplayDate(holiday.date)}`,
+            isPaid: true,
+            bonusAmount: String(holiday.amount),
+          }),
+        ),
+      );
+    });
+
+    for (let month = 1; month <= 12; month += 1) {
+      await this.payrollService.recalculatePeriodIfUnlocked(month, dto.year);
+    }
+
+    return this.listHolidaySettings(dto.year);
   }
 
   async list(month: number, year: number, employeeId?: string) {
@@ -574,11 +623,18 @@ export class AttendanceService {
   }
 
   private async getPayrollMonthSetting(month: number, year: number) {
-    const settings = await this.monthSettingRepository.findOne({
-      where: { month, year },
-    });
+    const holidayStats = await this.getPaidHolidayStats(month, year);
+    const holidayPaidDays = holidayStats.paidDays;
+    const standardWorkDay = Math.max(0, countStandardWorkDays(month, year) - holidayPaidDays);
 
-    return this.toMonthSettingDto(settings ?? undefined, month, year);
+    return {
+      month,
+      year,
+      standardWorkDay,
+      holidayPaidDays,
+      holidayBonusAmount: holidayPaidDays > 0 ? roundCurrency(holidayStats.bonusTotal / holidayPaidDays) : 0,
+      holidayBonusTotal: holidayStats.bonusTotal,
+    };
   }
 
   private toMonthSettingDto(settings: AttendanceMonthSetting | undefined, month: number, year: number): PayrollMonthSetting {
@@ -592,6 +648,18 @@ export class AttendanceService {
       holidayPaidDays,
       holidayBonusAmount,
       holidayBonusTotal: roundCurrency(holidayPaidDays * holidayBonusAmount),
+    };
+  }
+
+  private async getPaidHolidayStats(month: number, year: number) {
+    const { from, to } = getMonthRange(month, year);
+    const holidays = await this.holidayRepository.find({
+      where: { holidayDate: Between(from, to), isPaid: true },
+    });
+    const paidHolidays = holidays.filter((holiday) => !isSunday(holiday.holidayDate));
+    return {
+      paidDays: paidHolidays.length,
+      bonusTotal: roundCurrency(sum(paidHolidays.map((holiday) => Number(holiday.bonusAmount ?? 0)))),
     };
   }
 
@@ -777,14 +845,8 @@ export class AttendanceService {
     }
 
     const month = importMonthInput ?? importedMonths[0] ?? new Date().getMonth() + 1;
-    const settings = await this.getSettings();
     const payrollMonthSetting = await this.getPayrollMonthSetting(month, importYear);
-    const payrollPreview = await this.buildPayrollPreview(
-      previewRows,
-      employeeMap,
-      settings.overtimeRate,
-      payrollMonthSetting,
-    );
+    const payrollPreview = await this.buildPayrollPreview(previewRows, employeeMap, payrollMonthSetting);
 
     return {
       month,
@@ -802,77 +864,26 @@ export class AttendanceService {
   private async buildPayrollPreview(
     previewRows: AttendancePreviewRow[],
     employeeMap: ReturnType<typeof createEmployeeMap>,
-    overtimeRate: number,
     monthSetting: PayrollMonthSetting,
   ): Promise<AttendancePayrollPreview> {
-    const [allowances, deductions] = await Promise.all([
-      this.allowanceRepository.find({ where: { isActive: true }, relations: { employee: true } }),
-      this.deductionRepository.find({ where: { isActive: true }, relations: { employee: true } }),
-    ]);
-    const formulaSetting = await this.payrollService.getFormulaSetting();
     const standardWorkDay = monthSetting.standardWorkDay;
-    const bonusTotal = monthSetting.holidayBonusTotal;
     const records = previewRows.map((row) => {
       const employee =
         employeeMap.byCode.get(normalizeKey(row.employeeCode)) ?? employeeMap.byName.get(normalizeKey(row.employeeName));
       const configuredSalary = Number(employee?.baseSalary ?? 0);
       const workDay = sum(row.days.map((day) => Number(day.workDay)));
-      const overtimeMinutes = sum(row.days.map((day) => day.overtimeMinutes));
-      const payrollFormula = calculateExcelPayroll({
-        actualSalary: configuredSalary,
-        workDay,
-        standardWorkDay,
-        overtimeMinutes,
-        overtimeRate,
-        holidayBonusTotal: bonusTotal,
-        insuranceSalary: formulaSetting.insuranceBaseSalary,
-        employeeInsuranceRate: formulaSetting.employeeInsuranceRate,
-        employerInsuranceRate: formulaSetting.employerInsuranceRate,
-        formulas: {
-          dailySalaryFormula: formulaSetting.dailySalaryFormula,
-          grossSalaryFormula: formulaSetting.grossSalaryFormula,
-          deductionFormula: formulaSetting.deductionFormula,
-          netSalaryFormula: formulaSetting.netSalaryFormula,
-          earningCategories: formulaSetting.earningCategories,
-          deductionCategories: formulaSetting.deductionCategories,
-        },
-        allowances: allowances.filter((allowance) => employee && allowance.employee.id === employee.id),
-        deductions: deductions.filter((deduction) => employee && deduction.employee.id === employee.id),
-      });
 
-      return {
+      return buildAttendancePayPreviewRecord({
         employeeId: employee?.id,
         employeeCode: employee?.employeeCode ?? row.employeeCode,
         employeeName: employee?.fullName ?? row.employeeName,
         departmentName: employee?.department?.name,
         positionName: employee?.position?.name,
         email: employee?.email,
-        configuredSalary: payrollFormula.actualSalary,
-        insuranceSalary: payrollFormula.insuranceSalary,
-        workDay: payrollFormula.workDay,
-        standardWorkDay: payrollFormula.standardWorkDay,
-        fixedDailySalary: payrollFormula.fixedDailySalary,
-        responsibilityAllowance: payrollFormula.responsibilityAllowance,
-        mealAllowance: payrollFormula.mealAllowance,
-        phoneAllowance: payrollFormula.phoneAllowance,
-        kpiAllowance: payrollFormula.kpiAllowance,
-        dailyTotal: payrollFormula.dailyTotal,
-        overtimeWorkDay: payrollFormula.overtimeWorkDay,
-        totalWorkDay: payrollFormula.totalWorkDay,
-        baseSalary: payrollFormula.earnedSalary,
-        earnedSalary: payrollFormula.earnedSalary,
-        allowanceTotal: payrollFormula.allowanceTotal,
-        bonusTotal: payrollFormula.bonusTotal,
-        overtimeTotal: payrollFormula.overtimeSalary,
-        grossSalary: payrollFormula.grossSalary,
-        employerInsuranceTotal: payrollFormula.employerInsuranceTotal,
-        insuranceTotal: payrollFormula.employeeInsuranceDeduction,
-        totalInsurance: payrollFormula.totalInsurance,
-        taxTotal: payrollFormula.personalIncomeTax,
-        advanceTotal: payrollFormula.advanceTotal,
-        deductionTotal: payrollFormula.totalDeduction,
-        netSalary: payrollFormula.netSalary,
-      };
+        configuredSalary,
+        workDay,
+        standardWorkDay,
+      });
     });
 
     return {
@@ -1688,6 +1699,71 @@ function filterAttendanceTotals<TTotals extends Record<string, unknown>>(
     earlyLeaveMinutes: visibleSet.has("earlyLeaveMinutes") ? totals.earlyLeaveMinutes : undefined,
     overtimeMinutes: visibleSet.has("overtimeMinutes") ? totals.overtimeMinutes : undefined,
   };
+}
+
+function validateSettingsYear(year: number) {
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    throw new HttpError(400, "INVALID_ATTENDANCE_SETTINGS_YEAR", "Năm cấu hình không hợp lệ");
+  }
+}
+
+function getYearRange(year: number) {
+  return {
+    from: `${year}-01-01`,
+    to: `${year}-12-31`,
+  };
+}
+
+function toHolidayDto(holiday: Holiday) {
+  return {
+    id: holiday.id,
+    date: holiday.holidayDate,
+    name: holiday.name,
+    isPaid: holiday.isPaid,
+    amount: Number(holiday.bonusAmount ?? 0),
+  };
+}
+
+function normalizeHolidaySettings(year: number, dto: AttendanceHolidaySettingsDto) {
+  const holidayInputs = dto.holidays ?? dto.dates?.map((date) => ({ date, amount: 0 })) ?? [];
+  const holidaysByDate = new Map<string, { date: string; amount: number }>();
+
+  for (const holiday of holidayInputs) {
+    const date = holiday.date.trim();
+    if (!isValidDateOnly(date) || !date.startsWith(`${year}-`)) {
+      throw new HttpError(400, "INVALID_HOLIDAY_DATE", "Ngày lễ không hợp lệ");
+    }
+
+    holidaysByDate.set(date, {
+      date,
+      amount: roundCurrency(holiday.amount ?? 0),
+    });
+  }
+
+  return Array.from(holidaysByDate.values()).sort((first, second) => first.date.localeCompare(second.date));
+}
+
+function isValidDateOnly(value: string) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return false;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function formatDisplayDate(value: string) {
+  const [, month, day] = value.split("-");
+  return `${day}/${month}`;
+}
+
+function isSunday(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day).getDay() === 0;
 }
 
 function countStandardWorkDays(month: number, year: number) {

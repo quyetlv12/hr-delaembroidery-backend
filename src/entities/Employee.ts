@@ -6,6 +6,7 @@ import { BankAccount } from "./BankAccount";
 import { Department } from "./Department";
 import { Position } from "./Position";
 import { SalaryRecord } from "./SalaryRecord";
+import { EmployeeSalaryHistory } from "./EmployeeSalaryHistory";
 import { User } from "./User";
 
 @Entity("employees")
@@ -85,4 +86,7 @@ export class Employee extends AppBaseEntity {
 
   @OneToMany(() => SalaryRecord, (salaryRecord) => salaryRecord.employee)
   salaryRecords!: SalaryRecord[];
+
+  @OneToMany(() => EmployeeSalaryHistory, (history) => history.employee)
+  salaryHistories!: EmployeeSalaryHistory[];
 }

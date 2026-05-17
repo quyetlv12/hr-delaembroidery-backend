@@ -47,8 +47,23 @@ export async function updateEmployeeController(req: Request, res: Response) {
     throw new HttpError(400, "INVALID_EMPLOYEE_ID", "ID nhân viên không hợp lệ");
   }
 
-  const employee = await employeeService.update(id, req.body);
+  const employee = await employeeService.update(id, req.body, getRequestActor(req));
   return ok(res, employee, "Đã cập nhật nhân viên");
+}
+
+export async function updateEmployeeSalaryController(req: Request, res: Response) {
+  const id = req.params.id;
+  if (typeof id !== "string") {
+    throw new HttpError(400, "INVALID_EMPLOYEE_ID", "ID nhân viên không hợp lệ");
+  }
+
+  const employee = await employeeService.updateSalary(id, req.body, getRequestActor(req));
+  return ok(res, employee, "Đã cập nhật lương nhân viên");
+}
+
+export async function increaseEmployeeSalariesController(req: Request, res: Response) {
+  const result = await employeeService.increaseSalaries(req.body, getRequestActor(req));
+  return ok(res, result, `Đã tăng lương ${result.updated} nhân viên`);
 }
 
 export async function deleteEmployeeController(req: Request, res: Response) {
@@ -63,8 +78,22 @@ export async function deleteEmployeeController(req: Request, res: Response) {
 
 export async function listEmployeeDocumentsController(req: Request, res: Response) {
   const employeeId = getEmployeeIdParam(req);
+  assertCanAccessEmployee(req, employeeId);
   const documents = await employeeService.listDocuments(employeeId);
   return ok(res, documents);
+}
+
+export async function listEmployeeSalaryHistoryController(req: Request, res: Response) {
+  const employeeId = getEmployeeIdParam(req);
+  assertCanAccessEmployee(req, employeeId);
+  const histories = await employeeService.listSalaryHistory(employeeId);
+  return ok(res, histories);
+}
+
+export async function listEmployeeSalaryHistoriesController(req: Request, res: Response) {
+  const employeeScopeId = isEmployeeSelfService(req) ? req.user?.employeeId : undefined;
+  const histories = await employeeService.listSalaryHistories(employeeScopeId);
+  return ok(res, histories);
 }
 
 export async function uploadEmployeeDocumentsController(req: Request, res: Response) {
@@ -76,6 +105,7 @@ export async function uploadEmployeeDocumentsController(req: Request, res: Respo
 
 export async function downloadEmployeeDocumentController(req: Request, res: Response) {
   const employeeId = getEmployeeIdParam(req);
+  assertCanAccessEmployee(req, employeeId);
   const documentId = getDocumentIdParam(req);
   const document = await employeeService.getDocumentForDownload(employeeId, documentId);
   res.download(document.path, document.fileName, {
@@ -90,6 +120,18 @@ export async function deleteEmployeeDocumentController(req: Request, res: Respon
   const documentId = getDocumentIdParam(req);
   const result = await employeeService.deleteDocument(employeeId, documentId);
   return ok(res, result, "Đã xóa file nhân viên");
+}
+
+export async function uploadEmployeeAvatarController(req: Request, res: Response) {
+  const employeeId = getEmployeeIdParam(req);
+  const employee = await employeeService.uploadAvatar(employeeId, req.file);
+  return ok(res, employee, "Đã cập nhật ảnh đại diện");
+}
+
+export async function deleteEmployeeAvatarController(req: Request, res: Response) {
+  const employeeId = getEmployeeIdParam(req);
+  const employee = await employeeService.deleteAvatar(employeeId);
+  return ok(res, employee, "Đã xóa ảnh đại diện");
 }
 
 function getEmployeeIdParam(req: Request) {
@@ -114,4 +156,19 @@ function isEmployeeSelfService(req: Request) {
     !req.user?.permissions.includes(PERMISSIONS.employeesUpdate) &&
     !req.user?.permissions.includes(PERMISSIONS.attendanceImport)
   );
+}
+
+function assertCanAccessEmployee(req: Request, employeeId: string) {
+  if (isEmployeeSelfService(req) && employeeId !== req.user?.employeeId) {
+    throw new HttpError(403, "FORBIDDEN", "Bạn chỉ được xem hồ sơ của chính mình");
+  }
+}
+
+function getRequestActor(req: Request) {
+  return req.user
+    ? {
+        id: req.user.id,
+        loginCode: req.user.loginCode,
+      }
+    : undefined;
 }

@@ -1,7 +1,9 @@
 import type { Allowance, Deduction } from "../../entities";
-import type { PayrollFormulaSettingDto } from "./payroll.dto";
+import type { PayrollFormulaColumnKey, PayrollFormulaSettingDto } from "./payroll.dto";
 
 export const DEFAULT_INSURANCE_SALARY = 5_062_000;
+export const DEFAULT_MEAL_ALLOWANCE = 30_000;
+export const DEFAULT_PHONE_ALLOWANCE = 20_000;
 
 const EMPLOYEE_SOCIAL_INSURANCE_RATE = 0.08;
 const EMPLOYEE_HEALTH_INSURANCE_RATE = 0.015;
@@ -15,45 +17,45 @@ const EMPLOYER_INSURANCE_RATE =
   EMPLOYER_SOCIAL_INSURANCE_RATE + EMPLOYER_HEALTH_INSURANCE_RATE + EMPLOYER_UNEMPLOYMENT_INSURANCE_RATE;
 const HOURS_PER_WORK_DAY = 8;
 
-export type PayrollFormulaCategoryInput = {
-  key: string;
+export type PayrollColumnFormulaInput = {
+  key: PayrollFormulaColumnKey;
   name: string;
   formula: string;
 };
 
-type PayrollFormulaCategoryResult = PayrollFormulaCategoryInput & {
+type PayrollColumnFormulaResult = PayrollColumnFormulaInput & {
   amount: number;
-  type: "earning" | "deduction";
 };
 
-export const DEFAULT_EARNING_CATEGORIES: PayrollFormulaCategoryInput[] = [
-  { key: "luongCoDinh", name: "Lương cố định", formula: "baoHiemNgay" },
-  { key: "trachNhiem", name: "Trách nhiệm", formula: "phuCapTrachNhiem / ngayCong" },
-  { key: "anCa", name: "Ăn ca", formula: "phuCapAnCa / ngayCong" },
-  { key: "dienThoai", name: "Điện thoại", formula: "phuCapDienThoai / ngayCong" },
+export const DEFAULT_PAYROLL_COLUMN_FORMULAS: PayrollColumnFormulaInput[] = [
+  { key: "fixedDailySalary", name: "Lương cố định", formula: "baoHiemNgay" },
+  { key: "responsibilityAllowance", name: "Trách nhiệm", formula: "phuCapTrachNhiem / ngayCong" },
+  { key: "mealAllowance", name: "Ăn ca", formula: "anCaMacDinh" },
+  { key: "phoneAllowance", name: "Điện thoại", formula: "dienThoaiMacDinh" },
   {
-    key: "kpi",
+    key: "kpiAllowance",
     name: "KPI",
     formula: "(luongNgayThucHuong - baoHiemNgay) + (phuCapKpi + phuCapKhac + thuongLe) / ngayCong",
   },
-];
-
-export const DEFAULT_DEDUCTION_CATEGORIES: PayrollFormulaCategoryInput[] = [
-  { key: "bhxhNhanVien", name: "BHXH NLĐ", formula: "luongBHXH * tyLeBHXHNLD / 100" },
-  { key: "thueTNCN", name: "Thuế TNCN", formula: "khauTruThue" },
-  { key: "tamUng", name: "Tạm ứng", formula: "tamUng" },
+  { key: "dailyTotal", name: "Tổng lương ngày", formula: "luongCoDinh + trachNhiem + anCa + dienThoai + kpi" },
+  { key: "earnedSalary", name: "Lương trong tháng", formula: "tongLuongNgay * ngayCong" },
+  { key: "overtimeTotal", name: "Lương tăng ca", formula: "soGioTangCa * luongNgayThucHuong / 8 * heSoOT" },
+  { key: "grossSalary", name: "Tổng lương", formula: "luongThang + luongTangCa" },
+  { key: "employerInsuranceTotal", name: "BHXH công ty", formula: "luongBHXH * tyLeBHXHCongTy / 100" },
+  { key: "insuranceTotal", name: "BHXH NLĐ", formula: "luongBHXH * tyLeBHXHNLD / 100" },
+  { key: "taxTotal", name: "Thuế TNCN", formula: "khauTruThue" },
+  { key: "advanceTotal", name: "Tạm ứng", formula: "tamUng" },
+  { key: "deductionTotal", name: "Tổng giảm trừ", formula: "bhxhNhanVien + thueTNCN + tamUng" },
+  { key: "netSalary", name: "Thực nhận", formula: "tongLuong - tongGiamTru" },
 ];
 
 export const DEFAULT_PAYROLL_FORMULA_SETTING: PayrollFormulaSettingDto = {
   insuranceBaseSalary: DEFAULT_INSURANCE_SALARY,
   employeeInsuranceRate: 10.5,
   employerInsuranceRate: 21.5,
-  earningCategories: DEFAULT_EARNING_CATEGORIES,
-  deductionCategories: DEFAULT_DEDUCTION_CATEGORIES,
-  dailySalaryFormula: "luongCoDinh + trachNhiem + anCa + dienThoai + kpi",
-  grossSalaryFormula: "luongThang + luongTangCa",
-  deductionFormula: "bhxhNhanVien + thueTNCN + tamUng",
-  netSalaryFormula: "tongLuong - tongGiamTru",
+  defaultMealAllowance: DEFAULT_MEAL_ALLOWANCE,
+  defaultPhoneAllowance: DEFAULT_PHONE_ALLOWANCE,
+  columnFormulas: DEFAULT_PAYROLL_COLUMN_FORMULAS,
 };
 
 type PayrollFormulaInput = {
@@ -66,13 +68,10 @@ type PayrollFormulaInput = {
   insuranceSalary?: number;
   employeeInsuranceRate?: number;
   employerInsuranceRate?: number;
+  defaultMealAllowance?: number;
+  defaultPhoneAllowance?: number;
   formulas?: {
-    dailySalaryFormula?: string;
-    grossSalaryFormula?: string;
-    deductionFormula?: string;
-    netSalaryFormula?: string;
-    earningCategories?: PayrollFormulaCategoryInput[];
-    deductionCategories?: PayrollFormulaCategoryInput[];
+    columnFormulas?: PayrollColumnFormulaInput[];
   };
   allowances?: Pick<Allowance, "name" | "amount">[];
   deductions?: Pick<Deduction, "name" | "amount">[];
@@ -111,7 +110,7 @@ export type PayrollFormulaResult = {
   advanceTotal: number;
   totalDeduction: number;
   netSalary: number;
-  categoryDetails: PayrollFormulaCategoryResult[];
+  formulaDetails: PayrollColumnFormulaResult[];
 };
 
 export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormulaResult {
@@ -123,8 +122,13 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
   const employerInsuranceRate = normalizeRate(input.employerInsuranceRate, EMPLOYER_INSURANCE_RATE);
   const employeeInsurancePercent = normalizePercentValue(input.employeeInsuranceRate, EMPLOYEE_INSURANCE_RATE);
   const employerInsurancePercent = normalizePercentValue(input.employerInsuranceRate, EMPLOYER_INSURANCE_RATE);
+  const defaultMealAllowance = sanitizeMoney(input.defaultMealAllowance ?? DEFAULT_MEAL_ALLOWANCE);
+  const defaultPhoneAllowance = sanitizeMoney(input.defaultPhoneAllowance ?? DEFAULT_PHONE_ALLOWANCE);
   const bonusTotal = roundCurrency(input.holidayBonusTotal ?? 0);
   const allowances = splitAllowances(input.allowances ?? []);
+  const mealAllowanceSource = allowances.meal > 0 ? allowances.meal : defaultMealAllowance * workDay;
+  const phoneAllowanceSource = allowances.phone > 0 ? allowances.phone : defaultPhoneAllowance * workDay;
+  const effectiveAllowanceTotal = allowances.responsibility + mealAllowanceSource + phoneAllowanceSource + allowances.kpi + allowances.other;
   const deductions = splitDeductions(input.deductions ?? []);
 
   const dailyActualSalary = standardWorkDay > 0 ? actualSalary / standardWorkDay : 0;
@@ -137,11 +141,13 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
     baoHiemNgay: fixedDailySalaryFallback,
     luongNgayThucHuong: dailyActualSalary,
     phuCapTrachNhiem: allowances.responsibility,
-    phuCapAnCa: allowances.meal,
-    phuCapDienThoai: allowances.phone,
+    phuCapAnCa: mealAllowanceSource,
+    phuCapDienThoai: phoneAllowanceSource,
+    anCaMacDinh: defaultMealAllowance,
+    dienThoaiMacDinh: defaultPhoneAllowance,
     phuCapKpi: allowances.kpi,
     phuCapKhac: allowances.other,
-    phuCap: allowances.total,
+    phuCap: effectiveAllowanceTotal,
     thuongLe: bonusTotal,
     soGioTangCa: input.overtimeMinutes / 60,
     heSoOT: input.overtimeRate,
@@ -150,101 +156,50 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
     khauTruThue: deductions.tax,
     tamUng: deductions.advance,
   };
-  const earningCategories = input.formulas?.earningCategories ?? DEFAULT_EARNING_CATEGORIES;
-  const earningValues = evaluateFormulaCategories(earningCategories, payrollVariables);
-  const fixedDailySalary = getFormulaValue(earningValues, "luongCoDinh", fixedDailySalaryFallback);
-  const responsibilityAllowance = getFormulaValue(earningValues, "trachNhiem", 0);
-  const mealAllowance = getFormulaValue(earningValues, "anCa", 0);
-  const phoneAllowance = getFormulaValue(earningValues, "dienThoai", 0);
-  const kpiAllowance = getFormulaValue(earningValues, "kpi", 0);
-  const dailyTotal = roundCurrency(
-    evaluateFormula(
-      input.formulas?.dailySalaryFormula,
-      sumFormulaValues(earningValues),
-      {
-        ...payrollVariables,
-        ...earningValues,
-      },
-    ),
+  const formulaVariables: Record<string, number> = { ...payrollVariables };
+  const columnFormulaMap = createColumnFormulaMap(input.formulas?.columnFormulas);
+  const formulaDetails: PayrollColumnFormulaResult[] = [];
+  const evaluateColumn = (key: PayrollFormulaColumnKey, fallback: number) => {
+    const formula = columnFormulaMap.get(key) ?? getDefaultColumnFormula(key);
+    const amount = roundCurrency(evaluateFormula(formula?.formula, fallback, formulaVariables));
+    assignColumnFormulaAliases(key, amount, formulaVariables);
+    if (formula) {
+      formulaDetails.push({ ...formula, amount });
+    }
+    return amount;
+  };
+
+  const fixedDailySalary = evaluateColumn("fixedDailySalary", fixedDailySalaryFallback);
+  const responsibilityAllowance = evaluateColumn("responsibilityAllowance", 0);
+  const mealAllowance = evaluateColumn("mealAllowance", 0);
+  const phoneAllowance = evaluateColumn("phoneAllowance", 0);
+  const kpiAllowance = evaluateColumn("kpiAllowance", 0);
+  const dailyTotal = evaluateColumn(
+    "dailyTotal",
+    fixedDailySalary + responsibilityAllowance + mealAllowance + phoneAllowance + kpiAllowance,
   );
   const overtimeWorkDay = roundNumber(input.overtimeMinutes / 60 / HOURS_PER_WORK_DAY);
   const totalWorkDay = roundNumber(workDay + overtimeWorkDay);
   const hourlyRate = dailyActualSalary / HOURS_PER_WORK_DAY;
-  const earnedSalary = roundCurrency(dailyTotal * workDay);
-  const overtimeSalary = roundCurrency((input.overtimeMinutes / 60) * hourlyRate * input.overtimeRate);
-  const grossSalary = roundCurrency(
-    evaluateFormula(input.formulas?.grossSalaryFormula, earnedSalary + overtimeSalary, {
-      ...payrollVariables,
-      ...earningValues,
-      luongNgay: dailyTotal,
-      tongLuongNgay: dailyTotal,
-      luongCong: earnedSalary,
-      luongThang: earnedSalary,
-      luongTrongThang: earnedSalary,
-      luongTangCa: overtimeSalary,
-    }),
-  );
+  const earnedSalary = evaluateColumn("earnedSalary", dailyTotal * workDay);
+  const overtimeSalary = evaluateColumn("overtimeTotal", (input.overtimeMinutes / 60) * hourlyRate * input.overtimeRate);
+  const grossSalary = evaluateColumn("grossSalary", earnedSalary + overtimeSalary);
 
   const employerSocialInsurance = roundCurrency(insuranceSalary * EMPLOYER_SOCIAL_INSURANCE_RATE);
   const employerHealthInsurance = roundCurrency(insuranceSalary * EMPLOYER_HEALTH_INSURANCE_RATE);
   const employerUnemploymentInsurance = roundCurrency(insuranceSalary * EMPLOYER_UNEMPLOYMENT_INSURANCE_RATE);
-  const employerInsuranceTotal = roundCurrency(insuranceSalary * employerInsuranceRate);
+  const employerInsuranceTotal = evaluateColumn("employerInsuranceTotal", insuranceSalary * employerInsuranceRate);
   const employeeSocialInsurance = roundCurrency(insuranceSalary * EMPLOYEE_SOCIAL_INSURANCE_RATE);
   const employeeHealthInsurance = roundCurrency(insuranceSalary * EMPLOYEE_HEALTH_INSURANCE_RATE);
   const employeeUnemploymentInsurance = roundCurrency(insuranceSalary * EMPLOYEE_UNEMPLOYMENT_INSURANCE_RATE);
   const defaultEmployeeInsuranceTotal = roundCurrency(insuranceSalary * employeeInsuranceRate);
-  const deductionCategories = input.formulas?.deductionCategories ?? DEFAULT_DEDUCTION_CATEGORIES;
-  const deductionValues = evaluateFormulaCategories(deductionCategories, {
-    ...payrollVariables,
-    ...earningValues,
-    luongNgay: dailyTotal,
-    tongLuongNgay: dailyTotal,
-    luongCong: earnedSalary,
-    luongThang: earnedSalary,
-    luongTrongThang: earnedSalary,
-    luongTangCa: overtimeSalary,
-    tongLuong: grossSalary,
-    bhxhCongTy: employerInsuranceTotal,
-    bhxhNhanVien: defaultEmployeeInsuranceTotal,
-  });
-  const employeeInsuranceTotal = getFormulaValue(deductionValues, "bhxhNhanVien", defaultEmployeeInsuranceTotal);
-  const personalIncomeTax = getFormulaValue(deductionValues, "thueTNCN", roundCurrency(deductions.tax));
-  const advanceTotal = getFormulaValue(deductionValues, "tamUng", roundCurrency(deductions.advance));
+  const employeeInsuranceTotal = evaluateColumn("insuranceTotal", defaultEmployeeInsuranceTotal);
+  const personalIncomeTax = evaluateColumn("taxTotal", roundCurrency(deductions.tax));
+  const advanceTotal = evaluateColumn("advanceTotal", roundCurrency(deductions.advance));
   const employeeInsuranceDeduction = employeeInsuranceTotal;
   const totalInsurance = roundCurrency(employerInsuranceTotal + employeeInsuranceTotal);
-  const totalDeduction = roundCurrency(
-    evaluateFormula(input.formulas?.deductionFormula, sumFormulaValues(deductionValues), {
-      ...payrollVariables,
-      ...earningValues,
-      ...deductionValues,
-      tongLuong: grossSalary,
-      bhxhCongTy: employerInsuranceTotal,
-    }),
-  );
-  const netSalary = roundCurrency(
-    evaluateFormula(input.formulas?.netSalaryFormula, grossSalary - totalDeduction, {
-      ...payrollVariables,
-      ...earningValues,
-      ...deductionValues,
-      tongLuong: grossSalary,
-      tongGiamTru: totalDeduction,
-      luongThang: earnedSalary,
-      luongTrongThang: earnedSalary,
-      luongTangCa: overtimeSalary,
-    }),
-  );
-  const categoryDetails = [
-    ...earningCategories.map((category) => ({
-      ...category,
-      amount: getFormulaValue(earningValues, category.key, 0),
-      type: "earning" as const,
-    })),
-    ...deductionCategories.map((category) => ({
-      ...category,
-      amount: getFormulaValue(deductionValues, category.key, 0),
-      type: "deduction" as const,
-    })),
-  ];
+  const totalDeduction = evaluateColumn("deductionTotal", employeeInsuranceTotal + personalIncomeTax + advanceTotal);
+  const netSalary = evaluateColumn("netSalary", grossSalary - totalDeduction);
 
   return {
     actualSalary,
@@ -263,7 +218,7 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
     earnedSalary,
     overtimeSalary,
     grossSalary,
-    allowanceTotal: roundCurrency(allowances.total),
+    allowanceTotal: roundCurrency(effectiveAllowanceTotal),
     bonusTotal,
     employerSocialInsurance,
     employerHealthInsurance,
@@ -279,7 +234,7 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
     advanceTotal,
     totalDeduction,
     netSalary,
-    categoryDetails,
+    formulaDetails,
   };
 }
 
@@ -367,36 +322,56 @@ function normalizePercentValue(value: number | undefined, fallbackRate: number) 
   return numericValue > 1 ? numericValue : numericValue * 100;
 }
 
-function evaluateFormulaCategories(
-  categories: PayrollFormulaCategoryInput[],
-  variables: Record<string, number>,
-) {
-  const values: Record<string, number> = {};
+function createColumnFormulaMap(columnFormulas?: PayrollColumnFormulaInput[]) {
+  const map = new Map<PayrollFormulaColumnKey, PayrollColumnFormulaInput>();
 
-  for (const category of categories) {
-    const key = normalizeFormulaKey(category.key);
-    if (!key) {
-      continue;
-    }
-
-    values[key] = roundCurrency(evaluateFormula(category.formula, 0, { ...variables, ...values }));
+  for (const formula of DEFAULT_PAYROLL_COLUMN_FORMULAS) {
+    map.set(formula.key, formula);
   }
 
-  return values;
+  for (const formula of columnFormulas ?? []) {
+    map.set(formula.key, {
+      key: formula.key,
+      name: formula.name.trim() || getDefaultColumnFormula(formula.key)?.name || formula.key,
+      formula: formula.formula.trim(),
+    });
+  }
+
+  return map;
 }
 
-function normalizeFormulaKey(value: string) {
-  const trimmedValue = value.trim();
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedValue) ? trimmedValue : "";
+function getDefaultColumnFormula(key: PayrollFormulaColumnKey) {
+  return DEFAULT_PAYROLL_COLUMN_FORMULAS.find((formula) => formula.key === key);
 }
 
-function getFormulaValue(values: Record<string, number>, key: string, fallback: number) {
-  const value = values[key];
-  return Number.isFinite(value) ? value : fallback;
-}
+function assignColumnFormulaAliases(
+  key: PayrollFormulaColumnKey,
+  value: number,
+  variables: Record<string, number>,
+) {
+  variables[key] = value;
 
-function sumFormulaValues(values: Record<string, number>) {
-  return Object.values(values).reduce((total, value) => total + value, 0);
+  const aliases: Record<PayrollFormulaColumnKey, string[]> = {
+    fixedDailySalary: ["luongCoDinh"],
+    responsibilityAllowance: ["trachNhiem"],
+    mealAllowance: ["anCa"],
+    phoneAllowance: ["dienThoai"],
+    kpiAllowance: ["kpi"],
+    dailyTotal: ["luongNgay", "tongLuongNgay"],
+    earnedSalary: ["luongCong", "luongThang", "luongTrongThang"],
+    overtimeTotal: ["luongTangCa"],
+    grossSalary: ["tongLuong"],
+    employerInsuranceTotal: ["bhxhCongTy"],
+    insuranceTotal: ["bhxhNhanVien"],
+    taxTotal: ["thueTNCN"],
+    advanceTotal: ["tamUng"],
+    deductionTotal: ["tongGiamTru"],
+    netSalary: ["thucNhan"],
+  };
+
+  for (const alias of aliases[key]) {
+    variables[alias] = value;
+  }
 }
 
 function evaluateFormula(expression: string | undefined, fallback: number, variables: Record<string, number>) {

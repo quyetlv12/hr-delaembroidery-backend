@@ -9,14 +9,23 @@ import {
   confirmAttendanceImportController,
   getAttendanceSettingsController,
   importAttendanceController,
+  listAttendanceHolidaySettingsController,
   listAttendanceMonthSettingsController,
   listAttendanceController,
   previewAttendanceImportController,
+  resetAttendancePayrollController,
+  updateAttendanceHolidaySettingsController,
   updateAttendanceMonthSettingController,
   updateAttendanceSettingsController,
   updateAttendanceSummariesController,
 } from "./attendance.controller";
-import { attendanceMonthSettingDto, attendanceSettingsDto, updateAttendanceSummariesDto } from "./attendance.dto";
+import {
+  attendanceHolidaySettingsDto,
+  attendanceMonthSettingDto,
+  attendanceSettingsDto,
+  resetAttendancePayrollDto,
+  updateAttendanceSummariesDto,
+} from "./attendance.dto";
 
 export const attendanceRoutes = Router();
 
@@ -28,6 +37,17 @@ const upload = multer({
 });
 
 attendanceRoutes.use(authGuard);
+attendanceRoutes.get(
+  "/settings/holidays",
+  permissionGuard(PERMISSIONS.attendanceRead),
+  listAttendanceHolidaySettingsController,
+);
+attendanceRoutes.put(
+  "/settings/holidays",
+  permissionGuard(PERMISSIONS.attendanceImport),
+  validateBody(attendanceHolidaySettingsDto),
+  updateAttendanceHolidaySettingsController,
+);
 attendanceRoutes.get(
   "/settings/monthly",
   permissionGuard(PERMISSIONS.attendanceRead),
@@ -63,6 +83,12 @@ attendanceRoutes.post(
   "/import/confirm",
   permissionGuard(PERMISSIONS.attendanceImport),
   confirmAttendanceImportController,
+);
+attendanceRoutes.post(
+  "/reset-period",
+  permissionGuard(PERMISSIONS.attendanceImport),
+  validateBody(resetAttendancePayrollDto),
+  resetAttendancePayrollController,
 );
 attendanceRoutes.post(
   "/import",

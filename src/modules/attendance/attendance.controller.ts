@@ -4,7 +4,14 @@ import { ok } from "../../common/api-response";
 import { HttpError } from "../../common/http-error";
 import { PERMISSIONS } from "../../config/permissions";
 import { AttendanceService } from "./attendance.service";
-import type { AttendanceMonthSettingDto, AttendanceSettingsDto, UpdateAttendanceSummariesDto } from "./attendance.dto";
+import { resetAttendancePayrollPeriod } from "./attendance-reset.service";
+import type {
+  AttendanceHolidaySettingsDto,
+  AttendanceMonthSettingDto,
+  AttendanceSettingsDto,
+  ResetAttendancePayrollDto,
+  UpdateAttendanceSummariesDto,
+} from "./attendance.dto";
 
 const attendanceService = new AttendanceService();
 
@@ -56,6 +63,24 @@ export async function updateAttendanceMonthSettingController(
   return ok(res, settings, "Đã cập nhật cấu hình công tháng");
 }
 
+export async function listAttendanceHolidaySettingsController(req: Request, res: Response) {
+  const year = Number(req.query.year);
+  if (!year) {
+    throw new HttpError(400, "INVALID_HOLIDAY_SETTINGS_YEAR", "Vui lòng nhập năm cấu hình");
+  }
+
+  const settings = await attendanceService.listHolidaySettings(year);
+  return ok(res, settings);
+}
+
+export async function updateAttendanceHolidaySettingsController(
+  req: Request<unknown, unknown, AttendanceHolidaySettingsDto>,
+  res: Response,
+) {
+  const settings = await attendanceService.updateHolidaySettings(req.body);
+  return ok(res, settings, "Đã cập nhật ngày lễ");
+}
+
 export async function importAttendanceController(req: Request, res: Response) {
   if (!req.file) {
     throw new HttpError(400, "ATTENDANCE_FILE_REQUIRED", "Vui lòng chọn file chấm công");
@@ -68,7 +93,7 @@ export async function importAttendanceController(req: Request, res: Response) {
     autoCreateMissingEmployees: req.body.autoCreateMissingEmployees !== "false",
   });
 
-  return ok(res, result, "Đã nhập chấm công và tính lương");
+  return ok(res, result, "Đã nhập chấm công và cập nhật tiền công");
 }
 
 export async function previewAttendanceImportController(req: Request, res: Response) {
@@ -87,7 +112,15 @@ export async function previewAttendanceImportController(req: Request, res: Respo
 
 export async function confirmAttendanceImportController(req: Request, res: Response) {
   const result = await attendanceService.confirmImport(req.body);
-  return ok(res, result, "Đã nhập chấm công và tính lương");
+  return ok(res, result, "Đã nhập chấm công và cập nhật tiền công");
+}
+
+export async function resetAttendancePayrollController(
+  req: Request<unknown, unknown, ResetAttendancePayrollDto>,
+  res: Response,
+) {
+  const result = await resetAttendancePayrollPeriod(req.body);
+  return ok(res, result, "Đã reset chấm công và bảng lương");
 }
 
 export async function updateAttendanceSummariesController(

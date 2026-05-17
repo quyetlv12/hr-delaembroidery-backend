@@ -12,4 +12,7 @@ export class Holiday extends AppBaseEntity {
 
   @Column({ name: "is_paid", type: "boolean", default: true })
   isPaid!: boolean;
+
+  @Column({ name: "bonus_amount", type: "decimal", precision: 15, scale: 2, default: 0 })
+  bonusAmount!: string;
 }

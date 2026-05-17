@@ -285,14 +285,19 @@ async function seedPayrollFormulaSetting(
       insuranceBaseSalary: String(DEFAULT_PAYROLL_FORMULA_SETTING.insuranceBaseSalary),
       employeeInsuranceRate: String(DEFAULT_PAYROLL_FORMULA_SETTING.employeeInsuranceRate),
       employerInsuranceRate: String(DEFAULT_PAYROLL_FORMULA_SETTING.employerInsuranceRate),
-      earningCategories: DEFAULT_PAYROLL_FORMULA_SETTING.earningCategories.map((category) => ({ ...category })),
-      deductionCategories: DEFAULT_PAYROLL_FORMULA_SETTING.deductionCategories.map((category) => ({ ...category })),
-      dailySalaryFormula: DEFAULT_PAYROLL_FORMULA_SETTING.dailySalaryFormula,
-      grossSalaryFormula: DEFAULT_PAYROLL_FORMULA_SETTING.grossSalaryFormula,
-      deductionFormula: DEFAULT_PAYROLL_FORMULA_SETTING.deductionFormula,
-      netSalaryFormula: DEFAULT_PAYROLL_FORMULA_SETTING.netSalaryFormula,
+      defaultMealAllowance: String(DEFAULT_PAYROLL_FORMULA_SETTING.defaultMealAllowance),
+      defaultPhoneAllowance: String(DEFAULT_PAYROLL_FORMULA_SETTING.defaultPhoneAllowance),
+      columnFormulas: DEFAULT_PAYROLL_FORMULA_SETTING.columnFormulas.map((formula) => ({ ...formula })),
+      dailySalaryFormula: getDefaultPayrollColumnFormula("dailyTotal"),
+      grossSalaryFormula: getDefaultPayrollColumnFormula("grossSalary"),
+      deductionFormula: getDefaultPayrollColumnFormula("deductionTotal"),
+      netSalaryFormula: getDefaultPayrollColumnFormula("netSalary"),
     }),
   );
+}
+
+function getDefaultPayrollColumnFormula(key: string) {
+  return DEFAULT_PAYROLL_FORMULA_SETTING.columnFormulas.find((formula) => formula.key === key)?.formula ?? "0";
 }
 
 async function seedEmployeeViewSetting(

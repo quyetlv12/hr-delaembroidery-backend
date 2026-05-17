@@ -8,6 +8,12 @@ type PayrollFormulaCategorySetting = {
   formula: string;
 };
 
+type PayrollFormulaColumnSetting = {
+  key: string;
+  name: string;
+  formula: string;
+};
+
 @Entity("payroll_formula_settings")
 export class PayrollFormulaSetting extends AppBaseEntity {
   @Column({ name: "insurance_base_salary", type: "decimal", precision: 15, scale: 2, default: 5062000 })
@@ -19,11 +25,20 @@ export class PayrollFormulaSetting extends AppBaseEntity {
   @Column({ name: "employer_insurance_rate", type: "decimal", precision: 7, scale: 4, default: 21.5 })
   employerInsuranceRate!: string;
 
+  @Column({ name: "default_meal_allowance", type: "decimal", precision: 15, scale: 2, default: 30000 })
+  defaultMealAllowance!: string;
+
+  @Column({ name: "default_phone_allowance", type: "decimal", precision: 15, scale: 2, default: 20000 })
+  defaultPhoneAllowance!: string;
+
   @Column({ name: "earning_categories", type: "json", nullable: true })
   earningCategories?: PayrollFormulaCategorySetting[] | string[] | null;
 
   @Column({ name: "deduction_categories", type: "json", nullable: true })
   deductionCategories?: PayrollFormulaCategorySetting[] | string[] | null;
+
+  @Column({ name: "column_formulas", type: "json", nullable: true })
+  columnFormulas?: PayrollFormulaColumnSetting[] | null;
 
   @Column({ name: "daily_salary_formula", type: "text" })
   dailySalaryFormula!: string;

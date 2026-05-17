@@ -57,7 +57,37 @@ export const attendanceMonthSettingDto = z.object({
     .max(1_000_000_000, "Tiền cộng ngày lễ quá lớn"),
 });
 
+const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Ngày phải có định dạng YYYY-MM-DD");
+
+const holidayBonusAmount = z.coerce
+  .number()
+  .min(0, "Tiền ngày lễ phải lớn hơn hoặc bằng 0")
+  .max(1_000_000_000, "Tiền ngày lễ quá lớn");
+
+const holidayInput = z.object({
+  date: dateOnly,
+  amount: holidayBonusAmount.default(0),
+});
+
+export const attendanceHolidaySettingsDto = z
+  .object({
+    year: z.coerce.number().int().min(2000, "Năm không hợp lệ").max(2100, "Năm không hợp lệ"),
+    dates: z.array(dateOnly).max(366, "Số ngày lễ quá lớn").optional(),
+    holidays: z.array(holidayInput).max(366, "Số ngày lễ quá lớn").optional(),
+  })
+  .refine((value) => value.dates !== undefined || value.holidays !== undefined, {
+    message: "Vui lòng chọn ngày lễ",
+    path: ["holidays"],
+  });
+
+export const resetAttendancePayrollDto = z.object({
+  month: z.coerce.number().int().min(1, "Tháng phải từ 1 đến 12").max(12, "Tháng phải từ 1 đến 12"),
+  year: z.coerce.number().int().min(2000, "Năm không hợp lệ").max(2100, "Năm không hợp lệ"),
+});
+
 export type UpdateAttendanceSummariesDto = z.infer<typeof updateAttendanceSummariesDto>;
 export type UpdateAttendanceSummaryRowDto = UpdateAttendanceSummariesDto["rows"][number];
 export type AttendanceSettingsDto = z.infer<typeof attendanceSettingsDto>;
 export type AttendanceMonthSettingDto = z.infer<typeof attendanceMonthSettingDto>;
+export type AttendanceHolidaySettingsDto = z.infer<typeof attendanceHolidaySettingsDto>;
+export type ResetAttendancePayrollDto = z.infer<typeof resetAttendancePayrollDto>;

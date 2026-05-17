@@ -4,6 +4,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import multer from "multer";
 
+import { HttpError } from "../../common/http-error";
 import { validateBody } from "../../common/validate";
 import { PERMISSIONS } from "../../config/permissions";
 import { authGuard } from "../../guards/auth.guard";
@@ -11,19 +12,27 @@ import { permissionGuard } from "../../guards/permission.guard";
 import {
   createEmployeeController,
   deleteEmployeeController,
+  deleteEmployeeAvatarController,
   deleteEmployeeDocumentController,
   downloadEmployeeDocumentController,
   getEmployeeController,
+  increaseEmployeeSalariesController,
   listEmployeeDocumentsController,
   listEmployeeFormOptionsController,
+  listEmployeeSalaryHistoriesController,
+  listEmployeeSalaryHistoryController,
   listEmployeesController,
+  uploadEmployeeAvatarController,
   uploadEmployeeDocumentsController,
   updateEmployeeController,
+  updateEmployeeSalaryController,
 } from "./employee.controller";
-import { createEmployeeDto } from "./employee.dto";
+import { createEmployeeDto, increaseEmployeeSalaryDto, updateEmployeeSalaryDto } from "./employee.dto";
 
 export const employeeRoutes = Router();
 const employeeDocumentDirectory = path.resolve(process.cwd(), "storage", "employee-documents");
+const employeeAvatarDirectory = path.resolve(process.cwd(), "storage", "employee-avatars");
+const allowedAvatarMimeTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const documentUpload = multer({
   storage: multer.diskStorage({
     destination(_req, _file, callback) {
@@ -36,10 +45,40 @@ const documentUpload = multer({
     },
   }),
 });
+const avatarUpload = multer({
+  storage: multer.diskStorage({
+    destination(_req, _file, callback) {
+      mkdirSync(employeeAvatarDirectory, { recursive: true });
+      callback(null, employeeAvatarDirectory);
+    },
+    filename(_req, file, callback) {
+      const extension = path.extname(file.originalname);
+      callback(null, `${Date.now()}-${randomUUID()}${extension}`);
+    },
+  }),
+  fileFilter(_req, file, callback) {
+    if (allowedAvatarMimeTypes.has(file.mimetype)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new HttpError(400, "EMPLOYEE_AVATAR_INVALID_TYPE", "Avatar phải là file ảnh"));
+  },
+});
 
 employeeRoutes.use(authGuard);
 employeeRoutes.get("/", permissionGuard(PERMISSIONS.employeesRead), listEmployeesController);
 employeeRoutes.get("/form-options", permissionGuard(PERMISSIONS.employeesRead), listEmployeeFormOptionsController);
+employeeRoutes.get(
+  "/salary-history",
+  permissionGuard(PERMISSIONS.employeesRead),
+  listEmployeeSalaryHistoriesController,
+);
+employeeRoutes.get(
+  "/:id/salary-history",
+  permissionGuard(PERMISSIONS.employeesRead),
+  listEmployeeSalaryHistoryController,
+);
 employeeRoutes.get("/:id/documents", permissionGuard(PERMISSIONS.employeesRead), listEmployeeDocumentsController);
 employeeRoutes.post(
   "/:id/documents",
@@ -57,12 +96,35 @@ employeeRoutes.delete(
   permissionGuard(PERMISSIONS.employeesUpdate),
   deleteEmployeeDocumentController,
 );
+employeeRoutes.post(
+  "/:id/avatar",
+  permissionGuard(PERMISSIONS.employeesUpdate),
+  avatarUpload.single("avatar"),
+  uploadEmployeeAvatarController,
+);
+employeeRoutes.delete(
+  "/:id/avatar",
+  permissionGuard(PERMISSIONS.employeesUpdate),
+  deleteEmployeeAvatarController,
+);
 employeeRoutes.get("/:id", permissionGuard(PERMISSIONS.employeesRead), getEmployeeController);
 employeeRoutes.post(
   "/",
   permissionGuard(PERMISSIONS.employeesCreate),
   validateBody(createEmployeeDto),
   createEmployeeController,
+);
+employeeRoutes.post(
+  "/salary-increase",
+  permissionGuard(PERMISSIONS.employeesUpdate),
+  validateBody(increaseEmployeeSalaryDto),
+  increaseEmployeeSalariesController,
+);
+employeeRoutes.patch(
+  "/:id/salary",
+  permissionGuard(PERMISSIONS.employeesUpdate),
+  validateBody(updateEmployeeSalaryDto),
+  updateEmployeeSalaryController,
 );
 employeeRoutes.put(
   "/:id",

@@ -1,12 +1,19 @@
 import bcrypt from "bcryptjs";
+import { In } from "typeorm";
 
 import { generateLoginCode, getLoginCodeFromEmployeeCode } from "../../common/login-code";
 import { systemRoles } from "../../config/permissions";
 import { AppDataSource } from "../../database/data-source";
 import { BankAccount, Department, Employee, Position, Role, User } from "../../entities";
-import type { CreateEmployeeDto, UpdateEmployeeDto } from "./employee.dto";
+import type { CreateEmployeeDto, IncreaseEmployeeSalaryDto, UpdateEmployeeDto } from "./employee.dto";
 
 const DEFAULT_EMPLOYEE_PASSWORD = "123456789";
+
+export type SalaryIncreaseChange = {
+  employee: Employee;
+  previousSalary: number;
+  newSalary: number;
+};
 
 export class EmployeeRepository {
   private readonly repository = AppDataSource.getRepository(Employee);
@@ -101,6 +108,65 @@ export class EmployeeRepository {
     await this.savePrimaryBankAccount(savedEmployee, dto);
     await this.ensureEmployeeUser(savedEmployee, dto);
     return this.findById(savedEmployee.id);
+  }
+
+  async updateSalary(id: string, salary: number) {
+    const employee = await this.findById(id);
+    if (!employee) {
+      return null;
+    }
+
+    employee.baseSalary = String(roundCurrency(salary));
+    await this.repository.save(employee);
+    return this.findById(employee.id);
+  }
+
+  async increaseSalaries(dto: IncreaseEmployeeSalaryDto): Promise<SalaryIncreaseChange[]> {
+    const employeeIds = Array.from(new Set(dto.employeeIds ?? []));
+    if (dto.employeeIds && employeeIds.length === 0) {
+      return [];
+    }
+
+    const employees = await this.repository.find({
+      where: employeeIds.length > 0
+        ? { id: In(employeeIds) }
+        : { status: In(["active", "probation"]) },
+    });
+    if (employees.length === 0) {
+      return [];
+    }
+
+    const changes: SalaryIncreaseChange[] = [];
+    for (const employee of employees) {
+      const previousSalary = Number(employee.baseSalary);
+      const nextSalary = getIncreasedSalary(previousSalary, dto);
+      if (Math.abs(nextSalary - previousSalary) < 1) {
+        continue;
+      }
+      employee.baseSalary = String(nextSalary);
+      changes.push({ employee, previousSalary, newSalary: nextSalary });
+    }
+
+    if (changes.length === 0) {
+      return [];
+    }
+
+    await this.repository.save(changes.map((change) => change.employee));
+    const savedEmployees = await this.repository.find({
+      where: { id: In(changes.map((change) => change.employee.id)) },
+      relations: {
+        department: true,
+        position: true,
+        bankAccounts: true,
+        user: true,
+      },
+      order: { employeeCode: "ASC" },
+    });
+    const savedEmployeeMap = new Map(savedEmployees.map((employee) => [employee.id, employee]));
+    return changes.map((change) => ({
+      ...change,
+      employee: savedEmployeeMap.get(change.employee.id) ?? change.employee,
+    }));
   }
 
   async softDelete(id: string) {
@@ -282,6 +348,7 @@ export class EmployeeRepository {
     await softDeleteTableRows(manager, "attendance_logs", "`employeeId` = ?", [employeeId], deletedAt);
     await softDeleteTableRows(manager, "attendance_summary", "`employeeId` = ?", [employeeId], deletedAt);
     await softDeleteTableRows(manager, "employee_documents", "`employeeId` = ?", [employeeId], deletedAt);
+    await softDeleteTableRows(manager, "employee_salary_histories", "`employeeId` = ?", [employeeId], deletedAt);
     await softDeleteTableRows(manager, "allowances", "`employeeId` = ?", [employeeId], deletedAt);
     await softDeleteTableRows(manager, "deductions", "`employeeId` = ?", [employeeId], deletedAt);
 
@@ -355,4 +422,15 @@ function buildDeletedCode(value: string, suffix: string) {
 function buildDeletedEmail(value: string, suffix: string) {
   const [localPart, domain = "deleted.local"] = value.split("@");
   return `deleted-${suffix}-${localPart}@${domain}`.slice(0, 180);
+}
+
+function getIncreasedSalary(currentSalary: number, dto: IncreaseEmployeeSalaryDto) {
+  const nextSalary = dto.mode === "percent"
+    ? currentSalary * (1 + dto.value / 100)
+    : currentSalary + dto.value;
+  return Math.min(1_000_000_000, Math.max(0, roundCurrency(nextSalary)));
+}
+
+function roundCurrency(value: number) {
+  return Math.round(Number.isFinite(value) ? value : 0);
 }

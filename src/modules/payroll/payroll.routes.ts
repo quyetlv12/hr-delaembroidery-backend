@@ -5,19 +5,59 @@ import { PERMISSIONS } from "../../config/permissions";
 import { authGuard } from "../../guards/auth.guard";
 import { permissionGuard } from "../../guards/permission.guard";
 import {
+  applyPayrollFormulaTemplateController,
   calculatePayrollController,
+  createPayrollFormulaTemplateController,
   exportPayrollTransferFileController,
   getPayrollFormulaSettingController,
+  listPayrollFormulaHistoryController,
+  listPayrollRecordHistoryController,
+  listPayrollFormulaTemplatesController,
   listPayrollController,
   lockPayrollController,
+  revertPayrollFormulaHistoryController,
+  revertPayrollRecordHistoryController,
+  unlockPayrollController,
+  updatePayrollRecordController,
   updatePayrollFormulaSettingController,
 } from "./payroll.controller";
-import { payrollFormulaSettingDto, payrollPeriodDto } from "./payroll.dto";
+import {
+  payrollFormulaSettingDto,
+  payrollFormulaTemplateCreateDto,
+  payrollPeriodDto,
+  payrollRecordUpdateDto,
+} from "./payroll.dto";
 
 export const payrollRoutes = Router();
 
 payrollRoutes.use(authGuard);
 payrollRoutes.get("/settings/formula", permissionGuard(PERMISSIONS.payrollRead), getPayrollFormulaSettingController);
+payrollRoutes.get(
+  "/settings/formula/history",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  listPayrollFormulaHistoryController,
+);
+payrollRoutes.post(
+  "/settings/formula/history/:id/revert",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  revertPayrollFormulaHistoryController,
+);
+payrollRoutes.get(
+  "/settings/formula/templates",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  listPayrollFormulaTemplatesController,
+);
+payrollRoutes.post(
+  "/settings/formula/templates",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  validateBody(payrollFormulaTemplateCreateDto),
+  createPayrollFormulaTemplateController,
+);
+payrollRoutes.post(
+  "/settings/formula/templates/:id/apply",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  applyPayrollFormulaTemplateController,
+);
 payrollRoutes.put(
   "/settings/formula",
   permissionGuard(PERMISSIONS.payrollCalculate),
@@ -25,11 +65,27 @@ payrollRoutes.put(
   updatePayrollFormulaSettingController,
 );
 payrollRoutes.get("/", permissionGuard(PERMISSIONS.payrollRead), listPayrollController);
+payrollRoutes.get(
+  "/periods/:id/record-history",
+  permissionGuard(PERMISSIONS.payrollRead),
+  listPayrollRecordHistoryController,
+);
+payrollRoutes.post(
+  "/record-history/:id/revert",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  revertPayrollRecordHistoryController,
+);
 payrollRoutes.post(
   "/calculate",
   permissionGuard(PERMISSIONS.payrollCalculate),
   validateBody(payrollPeriodDto),
   calculatePayrollController,
+);
+payrollRoutes.patch(
+  "/records/:id",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  validateBody(payrollRecordUpdateDto),
+  updatePayrollRecordController,
 );
 payrollRoutes.get(
   "/periods/:id/transfer-file",
@@ -37,3 +93,4 @@ payrollRoutes.get(
   exportPayrollTransferFileController,
 );
 payrollRoutes.post("/periods/:id/lock", permissionGuard(PERMISSIONS.payrollLock), lockPayrollController);
+payrollRoutes.post("/periods/:id/unlock", permissionGuard(PERMISSIONS.payrollLock), unlockPayrollController);

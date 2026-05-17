@@ -2,6 +2,7 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
+import path from "node:path";
 
 import { env } from "./config/env";
 import { authRoutes } from "./modules/auth/auth.routes";
@@ -24,6 +25,14 @@ export function createApp() {
   app.use(cors({ origin: env.FRONTEND_ORIGIN, credentials: true }));
   app.use(express.json({ limit: "2mb" }));
   app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));
+  app.use(
+    "/storage/employee-avatars",
+    express.static(path.resolve(process.cwd(), "storage", "employee-avatars"), {
+      setHeaders(res) {
+        res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      },
+    }),
+  );
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok" });

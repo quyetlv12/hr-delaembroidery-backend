@@ -34,5 +34,17 @@ export const createEmployeeDto = z.object({
   status: z.enum(["active", "inactive", "probation"]).default("active"),
 });
 
+export const updateEmployeeSalaryDto = z.object({
+  salary: z.coerce.number().min(0).max(1_000_000_000),
+});
+
+export const increaseEmployeeSalaryDto = z.object({
+  mode: z.enum(["percent", "amount"]),
+  value: z.coerce.number().positive().max(1_000_000_000),
+  employeeIds: z.array(z.string().uuid()).optional(),
+});
+
 export type CreateEmployeeDto = z.infer<typeof createEmployeeDto>;
 export type UpdateEmployeeDto = CreateEmployeeDto;
+export type UpdateEmployeeSalaryDto = z.infer<typeof updateEmployeeSalaryDto>;
+export type IncreaseEmployeeSalaryDto = z.infer<typeof increaseEmployeeSalaryDto>;

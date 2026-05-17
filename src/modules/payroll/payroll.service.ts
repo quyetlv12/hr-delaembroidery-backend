@@ -1,16 +1,18 @@
 import * as XLSX from "xlsx";
-import { Between } from "typeorm";
+import { Between, Not } from "typeorm";
 
 import { HttpError } from "../../common/http-error";
 import { AppDataSource } from "../../database/data-source";
 import {
   Allowance,
-  AttendanceMonthSetting,
   AttendanceSetting,
   AttendanceSummary,
   Deduction,
   Employee,
+  Holiday,
+  PayrollFormulaHistory,
   PayrollFormulaSetting,
+  PayrollFormulaTemplate,
   SalaryDetail,
   SalaryPeriod,
   SalaryRecord,
@@ -21,24 +23,36 @@ import {
 } from "../employee-view-settings/employee-view-settings.constants";
 import { EmployeeViewSettingsService } from "../employee-view-settings/employee-view-settings.service";
 import { calculateExcelPayroll, DEFAULT_PAYROLL_FORMULA_SETTING } from "./payroll-formula";
-import type { PayrollFormulaSettingDto, PayrollPeriodDto } from "./payroll.dto";
+import type {
+  PayrollFormulaColumnKey,
+  PayrollFormulaSettingDto,
+  PayrollFormulaTemplateCreateDto,
+  PayrollPeriodDto,
+} from "./payroll.dto";
 
 const DEFAULT_OVERTIME_RATE = 1.5;
 const DEFAULT_TRANSFER_DEBIT_ACCOUNT = "111003013254";
 const DEFAULT_TRANSFER_BANK_CODE = "79321001";
 const DEFAULT_FORMULA_SETTING: PayrollFormulaSettingDto = DEFAULT_PAYROLL_FORMULA_SETTING;
 
+type FormulaAuditUser = {
+  id?: string;
+  loginCode?: string;
+};
+
 export class PayrollService {
   private readonly attendanceRepository = AppDataSource.getRepository(AttendanceSummary);
-  private readonly attendanceMonthSettingRepository = AppDataSource.getRepository(AttendanceMonthSetting);
   private readonly attendanceSettingRepository = AppDataSource.getRepository(AttendanceSetting);
   private readonly employeeRepository = AppDataSource.getRepository(Employee);
+  private readonly holidayRepository = AppDataSource.getRepository(Holiday);
   private readonly allowanceRepository = AppDataSource.getRepository(Allowance);
   private readonly deductionRepository = AppDataSource.getRepository(Deduction);
   private readonly periodRepository = AppDataSource.getRepository(SalaryPeriod);
   private readonly recordRepository = AppDataSource.getRepository(SalaryRecord);
   private readonly detailRepository = AppDataSource.getRepository(SalaryDetail);
   private readonly formulaSettingRepository = AppDataSource.getRepository(PayrollFormulaSetting);
+  private readonly formulaHistoryRepository = AppDataSource.getRepository(PayrollFormulaHistory);
+  private readonly formulaTemplateRepository = AppDataSource.getRepository(PayrollFormulaTemplate);
   private readonly employeeViewSettingsService = new EmployeeViewSettingsService();
 
   async list(dto: PayrollPeriodDto, employeeId?: string) {
@@ -88,7 +102,9 @@ export class PayrollService {
     const standardWorkDay = monthSetting.standardWorkDay;
     const holidayBonusTotal = monthSetting.holidayBonusTotal;
     const overtimeRate = await this.getOvertimeRate();
-    const formulaSetting = await this.getFormulaSetting();
+    const formulaSetting = dto.formulaSetting
+      ? normalizeFormulaSettingSnapshot(dto.formulaSetting)
+      : await this.getFormulaSetting();
 
     for (const employee of employees.filter((item) => summariesByEmployee.has(item.id))) {
       const employeeSummaries = summariesByEmployee.get(employee.id) ?? [];
@@ -120,26 +136,144 @@ export class PayrollService {
     return setting ? this.toFormulaSettingDto(setting) : DEFAULT_FORMULA_SETTING;
   }
 
-  async updateFormulaSetting(dto: PayrollFormulaSettingDto) {
+  async updateFormulaSetting(dto: PayrollFormulaSettingDto, user?: FormulaAuditUser) {
+    const savedSetting = await this.saveFormulaSettingSnapshot(dto, {
+      action: "update",
+      note: "Cập nhật công thức",
+      user,
+    });
+    await this.recalculateUnlockedPeriods();
+    return savedSetting;
+  }
+
+  async listFormulaHistory() {
+    const histories = await this.formulaHistoryRepository.find({
+      order: { createdAt: "DESC" },
+      take: 30,
+    });
+
+    return histories.map((history) => ({
+      id: history.id,
+      action: history.action,
+      changeNote: history.changeNote ?? undefined,
+      changedByLoginCode: history.changedByLoginCode ?? undefined,
+      createdAt: history.createdAt,
+      setting: normalizeFormulaSettingSnapshot(history.snapshot),
+    }));
+  }
+
+  async revertFormulaHistory(id: string, user?: FormulaAuditUser) {
+    const history = await this.formulaHistoryRepository.findOne({ where: { id } });
+    if (!history) {
+      throw new HttpError(404, "PAYROLL_FORMULA_HISTORY_NOT_FOUND", "Không tìm thấy lịch sử công thức");
+    }
+
+    const savedSetting = await this.saveFormulaSettingSnapshot(history.snapshot, {
+      action: "revert",
+      note: `Khôi phục từ phiên bản ${formatDateTime(history.createdAt)}`,
+      user,
+    });
+    await this.recalculateUnlockedPeriods();
+    return savedSetting;
+  }
+
+  async listFormulaTemplates() {
+    const templates = await this.formulaTemplateRepository.find({
+      order: { createdAt: "DESC" },
+    });
+
+    return templates.map((template) => ({
+      id: template.id,
+      name: template.name,
+      description: template.description ?? undefined,
+      createdByLoginCode: template.createdByLoginCode ?? undefined,
+      createdAt: template.createdAt,
+      setting: normalizeFormulaSettingSnapshot(template.snapshot),
+    }));
+  }
+
+  async createFormulaTemplate(dto: PayrollFormulaTemplateCreateDto, user?: FormulaAuditUser) {
+    const template = await this.formulaTemplateRepository.save(
+      this.formulaTemplateRepository.create({
+        name: dto.name.trim(),
+        description: dto.description?.trim() || null,
+        createdByUserId: user?.id ?? null,
+        createdByLoginCode: user?.loginCode ?? null,
+        snapshot: normalizeFormulaSettingSnapshot(dto.setting),
+      }),
+    );
+
+    return {
+      id: template.id,
+      name: template.name,
+      description: template.description ?? undefined,
+      createdByLoginCode: template.createdByLoginCode ?? undefined,
+      createdAt: template.createdAt,
+      setting: normalizeFormulaSettingSnapshot(template.snapshot),
+    };
+  }
+
+  async applyFormulaTemplate(id: string, user?: FormulaAuditUser) {
+    const template = await this.formulaTemplateRepository.findOne({ where: { id } });
+    if (!template) {
+      throw new HttpError(404, "PAYROLL_FORMULA_TEMPLATE_NOT_FOUND", "Không tìm thấy mẫu công thức");
+    }
+
+    const savedSetting = await this.saveFormulaSettingSnapshot(template.snapshot, {
+      action: "template",
+      note: `Áp dụng mẫu ${template.name}`,
+      user,
+    });
+    await this.recalculateUnlockedPeriods();
+    return savedSetting;
+  }
+
+  private async saveFormulaSettingSnapshot(
+    dto: unknown,
+    audit: { action: string; note: string; user?: FormulaAuditUser },
+  ) {
     const existing = await this.formulaSettingRepository.findOne({
       where: {},
       order: { createdAt: "ASC" },
     });
     const setting = existing ?? this.formulaSettingRepository.create();
+    const previousSnapshot = existing ? this.toFormulaSettingDto(existing) : DEFAULT_FORMULA_SETTING;
+    const snapshot = normalizeFormulaSettingSnapshot(dto);
     this.formulaSettingRepository.merge(setting, {
-      insuranceBaseSalary: String(dto.insuranceBaseSalary),
-      employeeInsuranceRate: String(dto.employeeInsuranceRate),
-      employerInsuranceRate: String(dto.employerInsuranceRate),
-      earningCategories: dto.earningCategories,
-      deductionCategories: dto.deductionCategories,
-      dailySalaryFormula: dto.dailySalaryFormula,
-      grossSalaryFormula: dto.grossSalaryFormula,
-      deductionFormula: dto.deductionFormula,
-      netSalaryFormula: dto.netSalaryFormula,
+      insuranceBaseSalary: String(snapshot.insuranceBaseSalary),
+      employeeInsuranceRate: String(snapshot.employeeInsuranceRate),
+      employerInsuranceRate: String(snapshot.employerInsuranceRate),
+      defaultMealAllowance: String(snapshot.defaultMealAllowance),
+      defaultPhoneAllowance: String(snapshot.defaultPhoneAllowance),
+      columnFormulas: snapshot.columnFormulas,
+      dailySalaryFormula: existing?.dailySalaryFormula ?? getDefaultFormula("dailyTotal"),
+      grossSalaryFormula: existing?.grossSalaryFormula ?? getDefaultFormula("grossSalary"),
+      deductionFormula: existing?.deductionFormula ?? getDefaultFormula("deductionTotal"),
+      netSalaryFormula: existing?.netSalaryFormula ?? getDefaultFormula("netSalary"),
     });
 
     const savedSetting = await this.formulaSettingRepository.save(setting);
+    await this.formulaHistoryRepository.save(
+      this.formulaHistoryRepository.create({
+        action: audit.action,
+        changeNote: `Trước khi ${audit.note.toLocaleLowerCase("vi-VN")}`,
+        changedByUserId: audit.user?.id ?? null,
+        changedByLoginCode: audit.user?.loginCode ?? null,
+        snapshot: previousSnapshot,
+      }),
+    );
     return this.toFormulaSettingDto(savedSetting);
+  }
+
+  private async recalculateUnlockedPeriods() {
+    const periods = await this.periodRepository.find({
+      where: { status: Not("locked") },
+      order: { year: "ASC", month: "ASC" },
+    });
+
+    for (const period of periods) {
+      await this.calculatePeriod({ month: period.month, year: period.year });
+    }
   }
 
   async recalculateUnlockedPeriodsForEmployee(employeeId: string) {
@@ -185,6 +319,25 @@ export class PayrollService {
       .createQueryBuilder()
       .update(SalaryRecord)
       .set({ status: "locked" })
+      .where("salaryPeriodId = :periodId", { periodId: id })
+      .execute();
+
+    return this.list({ month: period.month, year: period.year });
+  }
+
+  async unlockPeriod(id: string) {
+    const period = await this.periodRepository.findOne({ where: { id } });
+    if (!period) {
+      throw new HttpError(404, "SALARY_PERIOD_NOT_FOUND", "Không tìm thấy kỳ lương");
+    }
+
+    period.status = "draft";
+    period.lockedAt = null;
+    await this.periodRepository.save(period);
+    await this.recordRepository
+      .createQueryBuilder()
+      .update(SalaryRecord)
+      .set({ status: "draft" })
       .where("salaryPeriodId = :periodId", { periodId: id })
       .execute();
 
@@ -319,13 +472,10 @@ export class PayrollService {
       insuranceSalary: input.formulaSetting.insuranceBaseSalary,
       employeeInsuranceRate: input.formulaSetting.employeeInsuranceRate,
       employerInsuranceRate: input.formulaSetting.employerInsuranceRate,
+      defaultMealAllowance: input.formulaSetting.defaultMealAllowance,
+      defaultPhoneAllowance: input.formulaSetting.defaultPhoneAllowance,
       formulas: {
-        dailySalaryFormula: input.formulaSetting.dailySalaryFormula,
-        grossSalaryFormula: input.formulaSetting.grossSalaryFormula,
-        deductionFormula: input.formulaSetting.deductionFormula,
-        netSalaryFormula: input.formulaSetting.netSalaryFormula,
-        earningCategories: input.formulaSetting.earningCategories,
-        deductionCategories: input.formulaSetting.deductionCategories,
+        columnFormulas: input.formulaSetting.columnFormulas,
       },
       allowances: input.allowances,
       deductions: input.deductions,
@@ -394,10 +544,10 @@ export class PayrollService {
           label: "Tổng lương = Lương trong tháng + Lương làm thêm giờ",
           amount: payrollFormula.grossSalary,
         },
-        ...payrollFormula.categoryDetails.map((detail) => ({
-          type: detail.type,
+        ...payrollFormula.formulaDetails.map((detail) => ({
+          type: "formula",
           label: `${detail.name} = ${detail.formula}`,
-          amount: detail.type === "deduction" ? -detail.amount : detail.amount,
+          amount: isDeductionFormulaKey(detail.key) ? -detail.amount : detail.amount,
         })),
         {
           type: "insurance",
@@ -542,15 +692,9 @@ export class PayrollService {
       insuranceBaseSalary: Number(setting.insuranceBaseSalary),
       employeeInsuranceRate: Number(setting.employeeInsuranceRate),
       employerInsuranceRate: Number(setting.employerInsuranceRate),
-      earningCategories: normalizeCategoryList(setting.earningCategories, DEFAULT_FORMULA_SETTING.earningCategories),
-      deductionCategories: normalizeCategoryList(
-        setting.deductionCategories,
-        DEFAULT_FORMULA_SETTING.deductionCategories,
-      ),
-      dailySalaryFormula: setting.dailySalaryFormula || DEFAULT_FORMULA_SETTING.dailySalaryFormula,
-      grossSalaryFormula: setting.grossSalaryFormula || DEFAULT_FORMULA_SETTING.grossSalaryFormula,
-      deductionFormula: setting.deductionFormula || DEFAULT_FORMULA_SETTING.deductionFormula,
-      netSalaryFormula: setting.netSalaryFormula || DEFAULT_FORMULA_SETTING.netSalaryFormula,
+      defaultMealAllowance: Number(setting.defaultMealAllowance ?? DEFAULT_FORMULA_SETTING.defaultMealAllowance),
+      defaultPhoneAllowance: Number(setting.defaultPhoneAllowance ?? DEFAULT_FORMULA_SETTING.defaultPhoneAllowance),
+      columnFormulas: normalizeColumnFormulaList(setting.columnFormulas ?? getLegacyColumnFormulas(setting)),
     };
   }
 
@@ -582,17 +726,26 @@ export class PayrollService {
   }
 
   private async getPayrollMonthSetting(month: number, year: number) {
-    const settings = await this.attendanceMonthSettingRepository.findOne({
-      where: { month, year },
-    });
-    const holidayPaidDays = Number(settings?.holidayPaidDays ?? 0);
-    const holidayBonusAmount = Number(settings?.holidayBonusAmount ?? 0);
+    const holidayStats = await this.getPaidHolidayStats(month, year);
+    const holidayPaidDays = holidayStats.paidDays;
 
     return {
-      standardWorkDay: Number(settings?.standardWorkDay ?? countStandardWorkDays(month, year)),
+      standardWorkDay: Math.max(0, countStandardWorkDays(month, year) - holidayPaidDays),
       holidayPaidDays,
-      holidayBonusAmount,
-      holidayBonusTotal: roundCurrency(holidayPaidDays * holidayBonusAmount),
+      holidayBonusAmount: holidayPaidDays > 0 ? roundCurrency(holidayStats.bonusTotal / holidayPaidDays) : 0,
+      holidayBonusTotal: holidayStats.bonusTotal,
+    };
+  }
+
+  private async getPaidHolidayStats(month: number, year: number) {
+    const { from, to } = getMonthRange(month, year);
+    const holidays = await this.holidayRepository.find({
+      where: { holidayDate: Between(from, to), isPaid: true },
+    });
+    const paidHolidays = holidays.filter((holiday) => !isSunday(holiday.holidayDate));
+    return {
+      paidDays: paidHolidays.length,
+      bonusTotal: roundCurrency(sum(paidHolidays.map((holiday) => Number(holiday.bonusAmount ?? 0)))),
     };
   }
 
@@ -670,6 +823,11 @@ function countStandardWorkDays(month: number, year: number) {
   return workDays;
 }
 
+function isSunday(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day).getDay() === 0;
+}
+
 function sum(values: number[]) {
   return values.reduce((total, value) => total + value, 0);
 }
@@ -682,12 +840,94 @@ function roundNumber(value: number) {
   return Math.round(value * 100) / 100;
 }
 
-function normalizeCategoryList(value: unknown, fallback: PayrollFormulaSettingDto["earningCategories"]) {
-  if (!Array.isArray(value)) {
-    return fallback;
+function normalizeFormulaSettingSnapshot(value: unknown): PayrollFormulaSettingDto {
+  const source = value && typeof value === "object" ? (value as Partial<PayrollFormulaSettingDto>) : {};
+  return {
+    insuranceBaseSalary: Number(source.insuranceBaseSalary ?? DEFAULT_FORMULA_SETTING.insuranceBaseSalary),
+    employeeInsuranceRate: Number(source.employeeInsuranceRate ?? DEFAULT_FORMULA_SETTING.employeeInsuranceRate),
+    employerInsuranceRate: Number(source.employerInsuranceRate ?? DEFAULT_FORMULA_SETTING.employerInsuranceRate),
+    defaultMealAllowance: Number(source.defaultMealAllowance ?? DEFAULT_FORMULA_SETTING.defaultMealAllowance),
+    defaultPhoneAllowance: Number(source.defaultPhoneAllowance ?? DEFAULT_FORMULA_SETTING.defaultPhoneAllowance),
+    columnFormulas: normalizeColumnFormulaList(source.columnFormulas),
+  };
+}
+
+function normalizeColumnFormulaList(value: unknown): PayrollFormulaSettingDto["columnFormulas"] {
+  const fallback = DEFAULT_FORMULA_SETTING.columnFormulas;
+  const fallbackByKey = new Map(fallback.map((formula) => [formula.key, formula]));
+  const formulasByKey = new Map<PayrollFormulaColumnKey, PayrollFormulaSettingDto["columnFormulas"][number]>();
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (!isColumnFormula(item) || !fallbackByKey.has(item.key)) {
+        continue;
+      }
+
+      const fallbackFormula = fallbackByKey.get(item.key);
+      const formula = normalizeDefaultDailyAllowanceFormula(item.key, item.formula.trim());
+      formulasByKey.set(item.key, {
+        key: item.key,
+        name: item.name.trim() || fallbackFormula?.name || item.key,
+        formula: formula || fallbackFormula?.formula || "0",
+      });
+    }
   }
 
-  if (value.every(isFormulaCategory)) {
+  return fallback.map((formula) => formulasByKey.get(formula.key) ?? { ...formula });
+}
+
+function normalizeDefaultDailyAllowanceFormula(key: PayrollFormulaColumnKey, formula: string) {
+  const compactFormula = formula.replace(/\s+/g, "");
+  if (key === "mealAllowance" && compactFormula === "phuCapAnCa/ngayCong") {
+    return "anCaMacDinh";
+  }
+  if (key === "phoneAllowance" && compactFormula === "phuCapDienThoai/ngayCong") {
+    return "dienThoaiMacDinh";
+  }
+  return formula;
+}
+
+function getLegacyColumnFormulas(setting: PayrollFormulaSetting): PayrollFormulaSettingDto["columnFormulas"] {
+  const earningCategories = normalizeLegacyCategoryList(setting.earningCategories);
+  const deductionCategories = normalizeLegacyCategoryList(setting.deductionCategories);
+  const findCategoryFormula = (categories: LegacyFormulaCategory[], key: string, fallback: string) =>
+    categories.find((category) => category.key === key)?.formula || fallback;
+
+  return DEFAULT_FORMULA_SETTING.columnFormulas.map((formula) => {
+    const legacyFormulaByKey: Partial<Record<PayrollFormulaColumnKey, string>> = {
+      fixedDailySalary: findCategoryFormula(earningCategories, "luongCoDinh", formula.formula),
+      responsibilityAllowance: findCategoryFormula(earningCategories, "trachNhiem", formula.formula),
+      mealAllowance: findCategoryFormula(earningCategories, "anCa", formula.formula),
+      phoneAllowance: findCategoryFormula(earningCategories, "dienThoai", formula.formula),
+      kpiAllowance: findCategoryFormula(earningCategories, "kpi", formula.formula),
+      dailyTotal: setting.dailySalaryFormula || formula.formula,
+      grossSalary: setting.grossSalaryFormula || formula.formula,
+      insuranceTotal: findCategoryFormula(deductionCategories, "bhxhNhanVien", formula.formula),
+      taxTotal: findCategoryFormula(deductionCategories, "thueTNCN", formula.formula),
+      advanceTotal: findCategoryFormula(deductionCategories, "tamUng", formula.formula),
+      deductionTotal: setting.deductionFormula || formula.formula,
+      netSalary: setting.netSalaryFormula || formula.formula,
+    };
+
+    return {
+      ...formula,
+      formula: legacyFormulaByKey[formula.key] ?? formula.formula,
+    };
+  });
+}
+
+type LegacyFormulaCategory = {
+  key: string;
+  name: string;
+  formula: string;
+};
+
+function normalizeLegacyCategoryList(value: unknown): LegacyFormulaCategory[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  if (value.every(isLegacyFormulaCategory)) {
     return value.map((item) => ({
       key: item.key.trim(),
       name: item.name.trim(),
@@ -696,17 +936,31 @@ function normalizeCategoryList(value: unknown, fallback: PayrollFormulaSettingDt
   }
 
   if (value.every((item) => typeof item === "string")) {
-    return value.map((item, index) => ({
-      key: fallback[index]?.key ?? `muc${index + 1}`,
+    return value.map((item, index): LegacyFormulaCategory => ({
+      key: `muc${index + 1}`,
       name: item.trim(),
-      formula: fallback[index]?.formula ?? "0",
+      formula: "0",
     }));
   }
 
-  return fallback;
+  return [];
 }
 
-function isFormulaCategory(value: unknown): value is PayrollFormulaSettingDto["earningCategories"][number] {
+function isColumnFormula(value: unknown): value is PayrollFormulaSettingDto["columnFormulas"][number] {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "key" in value &&
+    "name" in value &&
+    "formula" in value &&
+    typeof value.key === "string" &&
+    DEFAULT_FORMULA_SETTING.columnFormulas.some((formula) => formula.key === value.key) &&
+    typeof value.name === "string" &&
+    typeof value.formula === "string"
+  );
+}
+
+function isLegacyFormulaCategory(value: unknown): value is LegacyFormulaCategory {
   return (
     value !== null &&
     typeof value === "object" &&
@@ -717,6 +971,22 @@ function isFormulaCategory(value: unknown): value is PayrollFormulaSettingDto["e
     typeof value.name === "string" &&
     typeof value.formula === "string"
   );
+}
+
+function getDefaultFormula(key: PayrollFormulaColumnKey) {
+  return DEFAULT_FORMULA_SETTING.columnFormulas.find((formula) => formula.key === key)?.formula ?? "0";
+}
+
+function isDeductionFormulaKey(key: PayrollFormulaColumnKey) {
+  return ["insuranceTotal", "taxTotal", "advanceTotal", "deductionTotal"].includes(key);
+}
+
+function formatDateTime(value: Date) {
+  return new Intl.DateTimeFormat("vi-VN", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(value);
 }
 
 function formatPercent(value: number) {
