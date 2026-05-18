@@ -35,6 +35,7 @@ export class CreateEmployeeSalaryHistories20260517174500 implements MigrationInt
       "id",
     );
     if (!hasEmployeeForeignKey) {
+      await alignColumnWithReferencedColumn(queryRunner, "employee_salary_histories", "employeeId", "employees", "id");
       await queryRunner.createForeignKey(
         "employee_salary_histories",
         new TableForeignKey({
@@ -74,4 +75,52 @@ async function hasForeignKey(
     [tableName, columnName, referencedTableName, referencedColumnName],
   );
   return Array.isArray(rows) && rows.length > 0;
+}
+
+async function alignColumnWithReferencedColumn(
+  queryRunner: QueryRunner,
+  tableName: string,
+  columnName: string,
+  referencedTableName: string,
+  referencedColumnName: string,
+) {
+  const [referencedColumn] = (await queryRunner.query(
+    `
+      SELECT COLUMN_TYPE, CHARACTER_SET_NAME, COLLATION_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = ?
+        AND COLUMN_NAME = ?
+      LIMIT 1
+    `,
+    [referencedTableName, referencedColumnName],
+  )) as Array<{
+    COLUMN_TYPE: string;
+    CHARACTER_SET_NAME: string | null;
+    COLLATION_NAME: string | null;
+  }>;
+
+  if (!referencedColumn?.COLUMN_TYPE) {
+    return;
+  }
+
+  const characterSet = toSafeMysqlName(referencedColumn.CHARACTER_SET_NAME);
+  const collation = toSafeMysqlName(referencedColumn.COLLATION_NAME);
+  const characterSetClause = characterSet ? ` CHARACTER SET ${characterSet}` : "";
+  const collationClause = collation ? ` COLLATE ${collation}` : "";
+
+  await queryRunner.query(
+    `ALTER TABLE ${quoteIdentifier(tableName)} MODIFY COLUMN ${quoteIdentifier(columnName)} ${referencedColumn.COLUMN_TYPE}${characterSetClause}${collationClause} NOT NULL`,
+  );
+}
+
+function quoteIdentifier(value: string) {
+  return `\`${value.replace(/`/g, "``")}\``;
+}
+
+function toSafeMysqlName(value?: string | null) {
+  if (!value || !/^[0-9A-Za-z_]+$/.test(value)) {
+    return "";
+  }
+  return value;
 }
