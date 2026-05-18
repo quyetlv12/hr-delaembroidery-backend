@@ -22,15 +22,25 @@ export class CreateEmployeeDocuments20260512105000 implements MigrationInterface
       }),
       true,
     );
-    await queryRunner.createForeignKey(
-      "employee_documents",
-      new TableForeignKey({
-        columnNames: ["employeeId"],
-        referencedColumnNames: ["id"],
-        referencedTableName: "employees",
-        onDelete: "CASCADE",
-      }),
+    const table = await queryRunner.getTable("employee_documents");
+    const hasEmployeeForeignKey = table?.foreignKeys.some(
+      (foreignKey) =>
+        foreignKey.columnNames.includes("employeeId") &&
+        foreignKey.referencedTableName === "employees" &&
+        foreignKey.referencedColumnNames.includes("id"),
     );
+
+    if (!hasEmployeeForeignKey) {
+      await queryRunner.createForeignKey(
+        "employee_documents",
+        new TableForeignKey({
+          columnNames: ["employeeId"],
+          referencedColumnNames: ["id"],
+          referencedTableName: "employees",
+          onDelete: "CASCADE",
+        }),
+      );
+    }
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {

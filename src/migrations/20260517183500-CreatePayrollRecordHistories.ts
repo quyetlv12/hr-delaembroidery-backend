@@ -27,38 +27,40 @@ export class CreatePayrollRecordHistories20260517183500 implements MigrationInte
       true,
     );
 
-    await queryRunner.createForeignKey(
-      "payroll_record_histories",
-      new TableForeignKey({
-        columnNames: ["salaryPeriodId"],
-        referencedColumnNames: ["id"],
-        referencedTableName: "salary_periods",
-        onDelete: "CASCADE",
-      }),
-    );
-
-    await queryRunner.createForeignKey(
-      "payroll_record_histories",
-      new TableForeignKey({
-        columnNames: ["salaryRecordId"],
-        referencedColumnNames: ["id"],
-        referencedTableName: "salary_records",
-        onDelete: "CASCADE",
-      }),
-    );
-
-    await queryRunner.createForeignKey(
-      "payroll_record_histories",
-      new TableForeignKey({
-        columnNames: ["employeeId"],
-        referencedColumnNames: ["id"],
-        referencedTableName: "employees",
-        onDelete: "CASCADE",
-      }),
-    );
+    await this.createForeignKeyIfMissing(queryRunner, "salaryPeriodId", "salary_periods");
+    await this.createForeignKeyIfMissing(queryRunner, "salaryRecordId", "salary_records");
+    await this.createForeignKeyIfMissing(queryRunner, "employeeId", "employees");
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.dropTable("payroll_record_histories", true);
+  }
+
+  private async createForeignKeyIfMissing(
+    queryRunner: QueryRunner,
+    columnName: string,
+    referencedTableName: string,
+  ) {
+    const table = await queryRunner.getTable("payroll_record_histories");
+    const hasForeignKey = table?.foreignKeys.some(
+      (foreignKey) =>
+        foreignKey.columnNames.includes(columnName) &&
+        foreignKey.referencedTableName === referencedTableName &&
+        foreignKey.referencedColumnNames.includes("id"),
+    );
+
+    if (hasForeignKey) {
+      return;
+    }
+
+    await queryRunner.createForeignKey(
+      "payroll_record_histories",
+      new TableForeignKey({
+        columnNames: [columnName],
+        referencedColumnNames: ["id"],
+        referencedTableName,
+        onDelete: "CASCADE",
+      }),
+    );
   }
 }

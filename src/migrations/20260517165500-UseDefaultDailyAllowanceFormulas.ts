@@ -40,6 +40,12 @@ export class UseDefaultDailyAllowanceFormulas20260517165500 implements Migration
     queryRunner: QueryRunner,
     formulas: { mealFormula: string; phoneFormula: string },
   ) {
+    const hasTable = await queryRunner.hasTable("payroll_formula_settings");
+    const hasColumnFormulas = hasTable && await queryRunner.hasColumn("payroll_formula_settings", "column_formulas");
+    if (!hasColumnFormulas) {
+      return;
+    }
+
     const rows = await queryRunner.query("SELECT id, column_formulas FROM payroll_formula_settings");
     for (const row of rows as FormulaRow[]) {
       const columnFormulas = parseJsonArray(row.column_formulas);
@@ -55,6 +61,11 @@ export class UseDefaultDailyAllowanceFormulas20260517165500 implements Migration
     queryRunner: QueryRunner,
     formulas: { mealFormula: string; phoneFormula: string },
   ) {
+    const hasTable = await queryRunner.hasTable("payroll_formula_templates");
+    if (!hasTable) {
+      return;
+    }
+
     const rows = await queryRunner.query("SELECT id, snapshot FROM payroll_formula_templates");
     for (const row of rows as Array<{ id: string; snapshot?: unknown }>) {
       const snapshot = parseJsonObject(row.snapshot);

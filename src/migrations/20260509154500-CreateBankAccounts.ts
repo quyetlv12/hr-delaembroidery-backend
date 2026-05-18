@@ -22,15 +22,25 @@ export class CreateBankAccounts20260509154500 implements MigrationInterface {
       true,
     );
 
-    await queryRunner.createForeignKey(
-      "bank_accounts",
-      new TableForeignKey({
-        columnNames: ["employeeId"],
-        referencedColumnNames: ["id"],
-        referencedTableName: "employees",
-        onDelete: "CASCADE",
-      }),
+    const table = await queryRunner.getTable("bank_accounts");
+    const hasEmployeeForeignKey = table?.foreignKeys.some(
+      (foreignKey) =>
+        foreignKey.columnNames.includes("employeeId") &&
+        foreignKey.referencedTableName === "employees" &&
+        foreignKey.referencedColumnNames.includes("id"),
     );
+
+    if (!hasEmployeeForeignKey) {
+      await queryRunner.createForeignKey(
+        "bank_accounts",
+        new TableForeignKey({
+          columnNames: ["employeeId"],
+          referencedColumnNames: ["id"],
+          referencedTableName: "employees",
+          onDelete: "CASCADE",
+        }),
+      );
+    }
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {

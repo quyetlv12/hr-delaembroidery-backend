@@ -4,6 +4,11 @@ export class AddAttendanceOvertimeRate20260510104500 implements MigrationInterfa
   name = "AddAttendanceOvertimeRate20260510104500";
 
   async up(queryRunner: QueryRunner): Promise<void> {
+    const hasColumn = await queryRunner.hasColumn("attendance_settings", "overtime_rate");
+    if (hasColumn) {
+      return;
+    }
+
     await queryRunner.addColumn(
       "attendance_settings",
       new TableColumn({

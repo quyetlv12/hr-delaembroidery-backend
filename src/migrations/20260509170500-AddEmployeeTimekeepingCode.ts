@@ -4,6 +4,11 @@ export class AddEmployeeTimekeepingCode20260509170500 implements MigrationInterf
   name = "AddEmployeeTimekeepingCode20260509170500";
 
   async up(queryRunner: QueryRunner): Promise<void> {
+    const hasColumn = await queryRunner.hasColumn("employees", "timekeeping_code");
+    if (hasColumn) {
+      return;
+    }
+
     await queryRunner.addColumn(
       "employees",
       new TableColumn({

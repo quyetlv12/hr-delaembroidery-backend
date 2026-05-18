@@ -134,24 +134,8 @@ export class CreateAttendancePayrollTables20260509165000 implements MigrationInt
     await this.createEmployeeForeignKey(queryRunner, "salary_records");
     await this.createEmployeeForeignKey(queryRunner, "allowances");
     await this.createEmployeeForeignKey(queryRunner, "deductions");
-    await queryRunner.createForeignKey(
-      "salary_records",
-      new TableForeignKey({
-        columnNames: ["salaryPeriodId"],
-        referencedColumnNames: ["id"],
-        referencedTableName: "salary_periods",
-        onDelete: "CASCADE",
-      }),
-    );
-    await queryRunner.createForeignKey(
-      "salary_details",
-      new TableForeignKey({
-        columnNames: ["salaryRecordId"],
-        referencedColumnNames: ["id"],
-        referencedTableName: "salary_records",
-        onDelete: "CASCADE",
-      }),
-    );
+    await this.createForeignKeyIfMissing(queryRunner, "salary_records", "salaryPeriodId", "salary_periods");
+    await this.createForeignKeyIfMissing(queryRunner, "salary_details", "salaryRecordId", "salary_records");
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {
@@ -165,12 +149,33 @@ export class CreateAttendancePayrollTables20260509165000 implements MigrationInt
   }
 
   private createEmployeeForeignKey(queryRunner: QueryRunner, tableName: string) {
-    return queryRunner.createForeignKey(
+    return this.createForeignKeyIfMissing(queryRunner, tableName, "employeeId", "employees");
+  }
+
+  private async createForeignKeyIfMissing(
+    queryRunner: QueryRunner,
+    tableName: string,
+    columnName: string,
+    referencedTableName: string,
+  ) {
+    const table = await queryRunner.getTable(tableName);
+    const hasForeignKey = table?.foreignKeys.some(
+      (foreignKey) =>
+        foreignKey.columnNames.includes(columnName) &&
+        foreignKey.referencedTableName === referencedTableName &&
+        foreignKey.referencedColumnNames.includes("id"),
+    );
+
+    if (hasForeignKey) {
+      return;
+    }
+
+    await queryRunner.createForeignKey(
       tableName,
       new TableForeignKey({
-        columnNames: ["employeeId"],
+        columnNames: [columnName],
         referencedColumnNames: ["id"],
-        referencedTableName: "employees",
+        referencedTableName,
         onDelete: "CASCADE",
       }),
     );

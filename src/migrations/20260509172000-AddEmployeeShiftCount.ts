@@ -4,6 +4,11 @@ export class AddEmployeeShiftCount20260509172000 implements MigrationInterface {
   name = "AddEmployeeShiftCount20260509172000";
 
   async up(queryRunner: QueryRunner): Promise<void> {
+    const hasColumn = await queryRunner.hasColumn("employees", "shift_count");
+    if (hasColumn) {
+      return;
+    }
+
     await queryRunner.addColumn(
       "employees",
       new TableColumn({

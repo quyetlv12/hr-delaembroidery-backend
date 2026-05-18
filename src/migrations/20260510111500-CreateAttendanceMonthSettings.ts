@@ -22,14 +22,18 @@ export class CreateAttendanceMonthSettings20260510111500 implements MigrationInt
       true,
     );
 
-    await queryRunner.createIndex(
-      "attendance_month_settings",
-      new TableIndex({
-        name: "IDX_attendance_month_settings_period_unique",
-        columnNames: ["year", "month"],
-        isUnique: true,
-      }),
-    );
+    const table = await queryRunner.getTable("attendance_month_settings");
+    const hasPeriodIndex = table?.indices.some((index) => index.name === "IDX_attendance_month_settings_period_unique");
+    if (!hasPeriodIndex) {
+      await queryRunner.createIndex(
+        "attendance_month_settings",
+        new TableIndex({
+          name: "IDX_attendance_month_settings_period_unique",
+          columnNames: ["year", "month"],
+          isUnique: true,
+        }),
+      );
+    }
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {

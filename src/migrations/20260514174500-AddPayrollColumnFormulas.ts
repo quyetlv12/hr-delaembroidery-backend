@@ -4,6 +4,11 @@ export class AddPayrollColumnFormulas20260514174500 implements MigrationInterfac
   name = "AddPayrollColumnFormulas20260514174500";
 
   async up(queryRunner: QueryRunner): Promise<void> {
+    const hasColumn = await queryRunner.hasColumn("payroll_formula_settings", "column_formulas");
+    if (hasColumn) {
+      return;
+    }
+
     await queryRunner.addColumn(
       "payroll_formula_settings",
       new TableColumn({

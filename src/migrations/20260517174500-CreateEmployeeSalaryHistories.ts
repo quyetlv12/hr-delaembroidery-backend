@@ -27,15 +27,25 @@ export class CreateEmployeeSalaryHistories20260517174500 implements MigrationInt
       true,
     );
 
-    await queryRunner.createForeignKey(
-      "employee_salary_histories",
-      new TableForeignKey({
-        columnNames: ["employeeId"],
-        referencedColumnNames: ["id"],
-        referencedTableName: "employees",
-        onDelete: "CASCADE",
-      }),
+    const table = await queryRunner.getTable("employee_salary_histories");
+    const hasEmployeeForeignKey = table?.foreignKeys.some(
+      (foreignKey) =>
+        foreignKey.columnNames.includes("employeeId") &&
+        foreignKey.referencedTableName === "employees" &&
+        foreignKey.referencedColumnNames.includes("id"),
     );
+
+    if (!hasEmployeeForeignKey) {
+      await queryRunner.createForeignKey(
+        "employee_salary_histories",
+        new TableForeignKey({
+          columnNames: ["employeeId"],
+          referencedColumnNames: ["id"],
+          referencedTableName: "employees",
+          onDelete: "CASCADE",
+        }),
+      );
+    }
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {
