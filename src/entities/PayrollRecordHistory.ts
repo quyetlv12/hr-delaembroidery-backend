@@ -21,6 +21,7 @@ export type PayrollRecordSnapshot = {
   earnedSalary: number;
   allowanceTotal: number;
   bonusTotal: number;
+  bonus: number;
   overtimeTotal: number;
   grossSalary: number;
   employerInsuranceTotal: number;

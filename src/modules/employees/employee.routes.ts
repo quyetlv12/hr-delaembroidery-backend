@@ -19,15 +19,22 @@ import {
   increaseEmployeeSalariesController,
   listEmployeeDocumentsController,
   listEmployeeFormOptionsController,
+  listEmployeeMonthlyBonusHistoryController,
   listEmployeeSalaryHistoriesController,
   listEmployeeSalaryHistoryController,
   listEmployeesController,
   uploadEmployeeAvatarController,
   uploadEmployeeDocumentsController,
   updateEmployeeController,
+  updateEmployeeMonthlyBonusController,
   updateEmployeeSalaryController,
 } from "./employee.controller";
-import { createEmployeeDto, increaseEmployeeSalaryDto, updateEmployeeSalaryDto } from "./employee.dto";
+import {
+  createEmployeeDto,
+  increaseEmployeeSalaryDto,
+  updateEmployeeMonthlyBonusDto,
+  updateEmployeeSalaryDto,
+} from "./employee.dto";
 
 export const employeeRoutes = Router();
 const employeeDocumentDirectory = path.resolve(process.cwd(), "storage", "employee-documents");
@@ -79,6 +86,11 @@ employeeRoutes.get(
   permissionGuard(PERMISSIONS.employeesRead),
   listEmployeeSalaryHistoryController,
 );
+employeeRoutes.get(
+  "/:id/monthly-bonus-history",
+  permissionGuard(PERMISSIONS.employeesRead),
+  listEmployeeMonthlyBonusHistoryController,
+);
 employeeRoutes.get("/:id/documents", permissionGuard(PERMISSIONS.employeesRead), listEmployeeDocumentsController);
 employeeRoutes.post(
   "/:id/documents",
@@ -125,6 +137,12 @@ employeeRoutes.patch(
   permissionGuard(PERMISSIONS.employeesUpdate),
   validateBody(updateEmployeeSalaryDto),
   updateEmployeeSalaryController,
+);
+employeeRoutes.patch(
+  "/:id/monthly-bonus",
+  permissionGuard(PERMISSIONS.employeesUpdate),
+  validateBody(updateEmployeeMonthlyBonusDto),
+  updateEmployeeMonthlyBonusController,
 );
 employeeRoutes.put(
   "/:id",

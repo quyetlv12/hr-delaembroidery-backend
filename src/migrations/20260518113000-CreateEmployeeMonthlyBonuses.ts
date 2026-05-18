@@ -1,0 +1,109 @@
+import { MigrationInterface, QueryRunner, Table, TableForeignKey, TableIndex } from "typeorm";
+
+export class CreateEmployeeMonthlyBonuses20260518113000 implements MigrationInterface {
+  name = "CreateEmployeeMonthlyBonuses20260518113000";
+
+  async up(queryRunner: QueryRunner): Promise<void> {
+    const hasBonusTable = await queryRunner.hasTable("employee_monthly_bonuses");
+    if (!hasBonusTable) {
+      await queryRunner.createTable(
+        new Table({
+          name: "employee_monthly_bonuses",
+          columns: [
+            { name: "id", type: "varchar", length: "36", isPrimary: true },
+            { name: "employeeId", type: "varchar", length: "36" },
+            { name: "month", type: "int" },
+            { name: "year", type: "int" },
+            { name: "amount", type: "decimal", precision: 15, scale: 2, default: 0 },
+            { name: "changed_by_user_id", type: "varchar", length: "36", isNullable: true },
+            { name: "changed_by_login_code", type: "varchar", length: "50", isNullable: true },
+            { name: "created_at", type: "datetime", default: "CURRENT_TIMESTAMP" },
+            { name: "updated_at", type: "datetime", default: "CURRENT_TIMESTAMP" },
+            { name: "deleted_at", type: "datetime", isNullable: true },
+          ],
+        }),
+        true,
+      );
+    }
+
+    const bonusTable = await queryRunner.getTable("employee_monthly_bonuses");
+    const hasBonusUniqueIndex = bonusTable?.indices.some((index) =>
+      ["employeeId", "month", "year"].every((column) => index.columnNames.includes(column)),
+    );
+    if (!hasBonusUniqueIndex) {
+      await queryRunner.createIndex(
+        "employee_monthly_bonuses",
+        new TableIndex({
+          name: "IDX_employee_monthly_bonuses_employee_period",
+          columnNames: ["employeeId", "month", "year"],
+          isUnique: true,
+        }),
+      );
+    }
+    await ensureEmployeeForeignKey(queryRunner, "employee_monthly_bonuses");
+
+    const hasHistoryTable = await queryRunner.hasTable("employee_monthly_bonus_histories");
+    if (!hasHistoryTable) {
+      await queryRunner.createTable(
+        new Table({
+          name: "employee_monthly_bonus_histories",
+          columns: [
+            { name: "id", type: "varchar", length: "36", isPrimary: true },
+            { name: "employeeId", type: "varchar", length: "36" },
+            { name: "month", type: "int" },
+            { name: "year", type: "int" },
+            { name: "previous_bonus", type: "decimal", precision: 15, scale: 2, default: 0 },
+            { name: "new_bonus", type: "decimal", precision: 15, scale: 2, default: 0 },
+            { name: "changed_by_user_id", type: "varchar", length: "36", isNullable: true },
+            { name: "changed_by_login_code", type: "varchar", length: "50", isNullable: true },
+            { name: "created_at", type: "datetime", default: "CURRENT_TIMESTAMP" },
+            { name: "updated_at", type: "datetime", default: "CURRENT_TIMESTAMP" },
+            { name: "deleted_at", type: "datetime", isNullable: true },
+          ],
+        }),
+        true,
+      );
+    }
+
+    const historyTable = await queryRunner.getTable("employee_monthly_bonus_histories");
+    const hasHistoryIndex = historyTable?.indices.some((index) =>
+      ["employeeId", "year", "month"].every((column) => index.columnNames.includes(column)),
+    );
+    if (!hasHistoryIndex) {
+      await queryRunner.createIndex(
+        "employee_monthly_bonus_histories",
+        new TableIndex({
+          name: "IDX_employee_monthly_bonus_histories_employee_period",
+          columnNames: ["employeeId", "year", "month"],
+        }),
+      );
+    }
+    await ensureEmployeeForeignKey(queryRunner, "employee_monthly_bonus_histories");
+  }
+
+  async down(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.dropTable("employee_monthly_bonus_histories", true);
+    await queryRunner.dropTable("employee_monthly_bonuses", true);
+  }
+}
+
+async function ensureEmployeeForeignKey(queryRunner: QueryRunner, tableName: string) {
+  const table = await queryRunner.getTable(tableName);
+  const hasEmployeeForeignKey = table?.foreignKeys.some(
+    (foreignKey) =>
+      foreignKey.columnNames.includes("employeeId") &&
+      foreignKey.referencedTableName === "employees" &&
+      foreignKey.referencedColumnNames.includes("id"),
+  );
+  if (!hasEmployeeForeignKey) {
+    await queryRunner.createForeignKey(
+      tableName,
+      new TableForeignKey({
+        columnNames: ["employeeId"],
+        referencedColumnNames: ["id"],
+        referencedTableName: "employees",
+        onDelete: "CASCADE",
+      }),
+    );
+  }
+}

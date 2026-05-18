@@ -66,6 +66,7 @@ export const payrollRecordUpdateDto = z
     taxTotal: z.coerce.number().min(0).max(1_000_000_000).optional(),
     advanceTotal: z.coerce.number().min(0).max(1_000_000_000).optional(),
     deductionTotal: z.coerce.number().min(0).max(1_000_000_000).optional(),
+    bonus: z.coerce.number().min(0).max(1_000_000_000).optional(),
     netSalary: z.coerce.number().min(0).max(1_000_000_000).optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {

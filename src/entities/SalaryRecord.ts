@@ -59,6 +59,9 @@ export class SalaryRecord extends AppBaseEntity {
   @Column({ name: "bonus_total", type: "decimal", precision: 15, scale: 2, default: 0 })
   bonusTotal!: string;
 
+  @Column({ name: "bonus", type: "decimal", precision: 15, scale: 2, default: 0 })
+  bonus!: string;
+
   @Column({ name: "overtime_total", type: "decimal", precision: 15, scale: 2, default: 0 })
   overtimeTotal!: string;
 

@@ -23,6 +23,7 @@ export const payrollEmployeeViewColumns = [
   "taxTotal",
   "advanceTotal",
   "deductionTotal",
+  "bonus",
   "netSalary",
   "dependentNote",
   "status",

@@ -508,6 +508,8 @@ export class PayrollService {
       totalWorkDay: String(payrollFormula.totalWorkDay),
       allowanceTotal: String(payrollFormula.allowanceTotal),
       bonusTotal: String(payrollFormula.bonusTotal),
+      // bonus (thưởng) is set manually per employee — preserve existing value on recalculate
+      bonus: existingRecord ? existingRecord.bonus : "0",
       overtimeTotal: String(payrollFormula.overtimeSalary),
       grossSalary: String(payrollFormula.grossSalary),
       employerInsuranceTotal: String(payrollFormula.employerInsuranceTotal),
@@ -516,7 +518,7 @@ export class PayrollService {
       taxTotal: String(payrollFormula.personalIncomeTax),
       advanceTotal: String(payrollFormula.advanceTotal),
       deductionTotal: String(payrollFormula.totalDeduction),
-      netSalary: String(payrollFormula.netSalary),
+      netSalary: String(payrollFormula.netSalary + (existingRecord ? Number(existingRecord.bonus) : 0)),
       status: input.period.status,
     });
 
@@ -667,6 +669,7 @@ export class PayrollService {
       earnedSalary,
       allowanceTotal: Number(record.allowanceTotal),
       bonusTotal: Number(record.bonusTotal),
+      bonus: Number(record.bonus),
       overtimeTotal: Number(record.overtimeTotal),
       grossSalary,
       employerInsuranceTotal,

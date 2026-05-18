@@ -11,6 +11,8 @@ export { Deduction } from "./Deduction";
 export { Department } from "./Department";
 export { Employee } from "./Employee";
 export { EmployeeDocument } from "./EmployeeDocument";
+export { EmployeeMonthlyBonus } from "./EmployeeMonthlyBonus";
+export { EmployeeMonthlyBonusHistory } from "./EmployeeMonthlyBonusHistory";
 export { EmployeeSalaryHistory } from "./EmployeeSalaryHistory";
 export { EmployeeViewSetting } from "./EmployeeViewSetting";
 export { Holiday } from "./Holiday";

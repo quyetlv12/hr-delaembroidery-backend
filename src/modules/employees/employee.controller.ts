@@ -9,7 +9,7 @@ const employeeService = new EmployeeService();
 
 export async function listEmployeesController(req: Request, res: Response) {
   const employeeScopeId = isEmployeeSelfService(req) ? req.user?.employeeId : undefined;
-  const employees = await employeeService.list(employeeScopeId);
+  const employees = await employeeService.list(employeeScopeId, getBonusPeriodQuery(req));
   return ok(res, employees);
 }
 
@@ -61,6 +61,16 @@ export async function updateEmployeeSalaryController(req: Request, res: Response
   return ok(res, employee, "Đã cập nhật lương nhân viên");
 }
 
+export async function updateEmployeeMonthlyBonusController(req: Request, res: Response) {
+  const id = req.params.id;
+  if (typeof id !== "string") {
+    throw new HttpError(400, "INVALID_EMPLOYEE_ID", "ID nhân viên không hợp lệ");
+  }
+
+  const employee = await employeeService.updateMonthlyBonus(id, req.body, getRequestActor(req));
+  return ok(res, employee, "Đã cập nhật thưởng tháng");
+}
+
 export async function increaseEmployeeSalariesController(req: Request, res: Response) {
   const result = await employeeService.increaseSalaries(req.body, getRequestActor(req));
   return ok(res, result, `Đã tăng lương ${result.updated} nhân viên`);
@@ -87,6 +97,13 @@ export async function listEmployeeSalaryHistoryController(req: Request, res: Res
   const employeeId = getEmployeeIdParam(req);
   assertCanAccessEmployee(req, employeeId);
   const histories = await employeeService.listSalaryHistory(employeeId);
+  return ok(res, histories);
+}
+
+export async function listEmployeeMonthlyBonusHistoryController(req: Request, res: Response) {
+  const employeeId = getEmployeeIdParam(req);
+  assertCanAccessEmployee(req, employeeId);
+  const histories = await employeeService.listMonthlyBonusHistory(employeeId);
   return ok(res, histories);
 }
 
@@ -148,6 +165,23 @@ function getDocumentIdParam(req: Request) {
     throw new HttpError(400, "INVALID_EMPLOYEE_DOCUMENT_ID", "ID file không hợp lệ");
   }
   return documentId;
+}
+
+function getBonusPeriodQuery(req: Request) {
+  const month = Number(req.query.bonusMonth);
+  const year = Number(req.query.bonusYear);
+  const hasMonth = req.query.bonusMonth !== undefined;
+  const hasYear = req.query.bonusYear !== undefined;
+  if (!hasMonth && !hasYear) {
+    return {};
+  }
+  if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year) || year < 2000 || year > 2100) {
+    throw new HttpError(400, "INVALID_BONUS_PERIOD", "Kỳ thưởng không hợp lệ");
+  }
+  return {
+    bonusMonth: month,
+    bonusYear: year,
+  };
 }
 
 function isEmployeeSelfService(req: Request) {

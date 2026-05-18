@@ -5,6 +5,7 @@ import type { PayrollRecordSnapshot } from "../../entities/PayrollRecordHistory"
 import type { PayrollRecordUpdateDto } from "./payroll.dto";
 import { DEFAULT_PAYROLL_FORMULA_SETTING } from "./payroll-formula";
 
+// bonus is editable but not in the formula-driven fields
 type EditablePayrollField = keyof PayrollRecordUpdateDto;
 
 type PayrollRecordState = Record<EditablePayrollField, number>;
@@ -157,6 +158,7 @@ export class PayrollRecordEditService {
       taxTotal: Number(record.taxTotal),
       advanceTotal: Number(record.advanceTotal),
       deductionTotal: Number(record.deductionTotal),
+      bonus: Number(record.bonus),
       netSalary: Number(record.netSalary),
     };
   }
@@ -213,7 +215,12 @@ export class PayrollRecordEditService {
     }
 
     if ((grossSalaryChanged || deductionTotalChanged) && !touched.has("netSalary")) {
-      state.netSalary = roundCurrency(Math.max(0, state.grossSalary - state.deductionTotal));
+      state.netSalary = roundCurrency(Math.max(0, state.grossSalary - state.deductionTotal + state.bonus));
+    }
+
+    // If bonus changed but netSalary not explicitly set, recalculate
+    if (touched.has("bonus") && !touched.has("netSalary")) {
+      state.netSalary = roundCurrency(Math.max(0, state.grossSalary - state.deductionTotal + state.bonus));
     }
   }
 
@@ -250,6 +257,7 @@ export class PayrollRecordEditService {
       taxTotal: String(state.taxTotal),
       advanceTotal: String(state.advanceTotal),
       deductionTotal: String(state.deductionTotal),
+      bonus: String(state.bonus),
       netSalary: String(state.netSalary),
     });
   }
@@ -271,6 +279,7 @@ export class PayrollRecordEditService {
       earnedSalary: Number(record.baseSalary),
       allowanceTotal: Number(record.allowanceTotal),
       bonusTotal: Number(record.bonusTotal),
+      bonus: Number(record.bonus),
       overtimeTotal: Number(record.overtimeTotal),
       grossSalary: Number(record.grossSalary),
       employerInsuranceTotal: Number(record.employerInsuranceTotal),
@@ -301,6 +310,7 @@ export class PayrollRecordEditService {
       baseSalary: String(snapshot.earnedSalary),
       allowanceTotal: String(snapshot.allowanceTotal),
       bonusTotal: String(snapshot.bonusTotal),
+      bonus: String(snapshot.bonus ?? 0),
       overtimeTotal: String(snapshot.overtimeTotal),
       grossSalary: String(snapshot.grossSalary),
       employerInsuranceTotal: String(snapshot.employerInsuranceTotal),
@@ -351,6 +361,7 @@ const payrollSnapshotFields: Array<keyof PayrollRecordSnapshot> = [
   "earnedSalary",
   "allowanceTotal",
   "bonusTotal",
+  "bonus",
   "overtimeTotal",
   "grossSalary",
   "employerInsuranceTotal",

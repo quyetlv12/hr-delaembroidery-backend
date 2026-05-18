@@ -1,11 +1,28 @@
 import { unlink } from "node:fs/promises";
 import path from "node:path";
+import { In } from "typeorm";
 
 import { HttpError } from "../../common/http-error";
 import { AppDataSource } from "../../database/data-source";
-import { Employee, EmployeeDocument, EmployeeSalaryHistory } from "../../entities";
+import {
+  Employee,
+  EmployeeDocument,
+  EmployeeMonthlyBonus,
+  EmployeeMonthlyBonusHistory,
+  EmployeeSalaryHistory,
+  PayrollRecordHistory,
+  SalaryPeriod,
+  SalaryRecord,
+} from "../../entities";
+import { PayrollRecordEditService } from "../payroll/payroll-record-edit.service";
 import { PayrollService } from "../payroll/payroll.service";
-import type { CreateEmployeeDto, IncreaseEmployeeSalaryDto, UpdateEmployeeDto, UpdateEmployeeSalaryDto } from "./employee.dto";
+import type {
+  CreateEmployeeDto,
+  IncreaseEmployeeSalaryDto,
+  UpdateEmployeeDto,
+  UpdateEmployeeMonthlyBonusDto,
+  UpdateEmployeeSalaryDto,
+} from "./employee.dto";
 import { EmployeeRepository } from "./employee.repository";
 
 const storageRoot = path.resolve(process.cwd(), "storage");
@@ -16,21 +33,33 @@ type SalaryChangeActor = {
   loginCode?: string;
 };
 
+type EmployeeListOptions = {
+  bonusMonth?: number;
+  bonusYear?: number;
+};
+
 export class EmployeeService {
   private readonly employeeOrmRepository = AppDataSource.getRepository(Employee);
   private readonly documentRepository = AppDataSource.getRepository(EmployeeDocument);
+  private readonly monthlyBonusRepository = AppDataSource.getRepository(EmployeeMonthlyBonus);
+  private readonly monthlyBonusHistoryRepository = AppDataSource.getRepository(EmployeeMonthlyBonusHistory);
   private readonly salaryHistoryRepository = AppDataSource.getRepository(EmployeeSalaryHistory);
+  private readonly payrollRecordHistoryRepository = AppDataSource.getRepository(PayrollRecordHistory);
+  private readonly salaryPeriodRepository = AppDataSource.getRepository(SalaryPeriod);
+  private readonly salaryRecordRepository = AppDataSource.getRepository(SalaryRecord);
 
   constructor(
     private readonly employeeRepository = new EmployeeRepository(),
     private readonly payrollService = new PayrollService(),
+    private readonly payrollRecordEditService = new PayrollRecordEditService(),
   ) {}
 
-  async list(employeeId?: string) {
+  async list(employeeId?: string, options: EmployeeListOptions = {}) {
     const employees = employeeId
       ? [await this.employeeRepository.findById(employeeId)].filter((employee): employee is Employee => Boolean(employee))
       : await this.employeeRepository.findAll();
-    return employees.map((employee) => this.toDto(employee));
+    const monthlyBonusByEmployee = await this.getMonthlyBonusMap(employees, options);
+    return employees.map((employee) => this.toDto(employee, monthlyBonusByEmployee.get(employee.id) ?? 0));
   }
 
   async create(dto: CreateEmployeeDto) {
@@ -86,6 +115,49 @@ export class EmployeeService {
     return this.toDto(employee);
   }
 
+  async updateMonthlyBonus(id: string, dto: UpdateEmployeeMonthlyBonusDto, actor?: SalaryChangeActor) {
+    const employee = await this.ensureEmployeeExists(id);
+    const amount = roundCurrency(dto.amount);
+    const existingPeriod = await this.salaryPeriodRepository.findOne({ where: { month: dto.month, year: dto.year } });
+    const existingRecord = existingPeriod
+      ? await this.findSalaryRecord(existingPeriod.id, employee.id)
+      : null;
+    const existingBonus = await this.findMonthlyBonus(employee.id, dto.month, dto.year);
+    const previousAmount = Number(existingBonus?.amount ?? existingRecord?.bonus ?? 0);
+    const isPayrollLocked = existingPeriod?.status === "locked" || existingRecord?.status === "locked";
+
+    await this.saveMonthlyBonus({
+      actor,
+      amount,
+      employee,
+      existingBonus,
+      month: dto.month,
+      previousAmount,
+      writeHistory: isPayrollLocked,
+      year: dto.year,
+    });
+
+    if (isPayrollLocked) {
+      return this.toDto(employee, amount);
+    }
+
+    if (!existingRecord && amount <= 0) {
+      return this.toDto(employee, 0);
+    }
+
+    const record =
+      existingRecord ??
+      (await this.createDraftSalaryRecord({
+        employee,
+        month: dto.month,
+        year: dto.year,
+      }));
+
+    await this.payrollRecordEditService.updateRecord(record.id, { bonus: amount }, actor);
+    const reloadedEmployee = await this.employeeRepository.findById(employee.id);
+    return this.toDto(reloadedEmployee ?? employee, amount);
+  }
+
   async increaseSalaries(dto: IncreaseEmployeeSalaryDto, actor?: SalaryChangeActor) {
     const changes = await this.employeeRepository.increaseSalaries(dto);
     for (const change of changes) {
@@ -133,6 +205,54 @@ export class EmployeeService {
   async listSalaryHistory(employeeId: string) {
     await this.ensureEmployeeExists(employeeId);
     return this.listSalaryHistories(employeeId);
+  }
+
+  async listMonthlyBonusHistory(employeeId: string) {
+    await this.ensureEmployeeExists(employeeId);
+    const monthlyBonusHistories = await this.monthlyBonusHistoryRepository.find({
+      where: { employee: { id: employeeId } },
+      relations: { employee: true },
+      order: { createdAt: "DESC" },
+      take: 100,
+    });
+    const histories = await this.payrollRecordHistoryRepository.find({
+      where: { employee: { id: employeeId } },
+      relations: { employee: true, salaryPeriod: true },
+      order: { createdAt: "DESC" },
+      take: 100,
+    });
+
+    const directBonusHistories = monthlyBonusHistories.map((history) => ({
+      id: history.id,
+      employeeId: history.employee?.id,
+      employeeCode: history.employee?.employeeCode,
+      employeeName: history.employee?.fullName,
+      month: history.month,
+      year: history.year,
+      previousBonus: Number(history.previousBonus ?? 0),
+      newBonus: Number(history.newBonus ?? 0),
+      changedByLoginCode: history.changedByLoginCode ?? undefined,
+      createdAt: history.createdAt,
+    }));
+
+    const payrollBonusHistories = histories
+      .filter((history) => history.requestedFields.includes("bonus") || history.changedFields.includes("bonus"))
+      .map((history) => ({
+        id: history.id,
+        employeeId: history.employee?.id,
+        employeeCode: history.employee?.employeeCode,
+        employeeName: history.employee?.fullName,
+        month: history.salaryPeriod?.month,
+        year: history.salaryPeriod?.year,
+        previousBonus: Number(history.previousSnapshot.bonus ?? 0),
+        newBonus: Number(history.nextSnapshot.bonus ?? 0),
+        changedByLoginCode: history.changedByLoginCode ?? undefined,
+        createdAt: history.createdAt,
+      }));
+
+    return [...directBonusHistories, ...payrollBonusHistories]
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+      .slice(0, 20);
   }
 
   async listSalaryHistories(employeeId?: string) {
@@ -217,6 +337,167 @@ export class EmployeeService {
     return employee;
   }
 
+  private async getMonthlyBonusMap(employees: Employee[], options: EmployeeListOptions) {
+    const month = options.bonusMonth;
+    const year = options.bonusYear;
+    if (!month || !year || employees.length === 0) {
+      return new Map<string, number>();
+    }
+
+    const employeeIds = employees.map((employee) => employee.id);
+    const monthlyBonusMap = new Map<string, number>();
+    const period = await this.salaryPeriodRepository.findOne({ where: { month, year } });
+    const isLockedPeriod = period?.status === "locked";
+    if (period) {
+      const records = await this.salaryRecordRepository.find({
+        where: {
+          employee: { id: In(employeeIds) },
+          salaryPeriod: { id: period.id },
+        },
+        relations: { employee: true, salaryPeriod: true },
+      });
+      for (const record of records) {
+        monthlyBonusMap.set(record.employee.id, Number(record.bonus));
+      }
+    }
+
+    const bonuses = await this.monthlyBonusRepository.find({
+      where: {
+        employee: { id: In(employeeIds) },
+        month,
+        year,
+      },
+      relations: { employee: true },
+    });
+    for (const bonus of bonuses) {
+      if (isLockedPeriod || !monthlyBonusMap.has(bonus.employee.id)) {
+        monthlyBonusMap.set(bonus.employee.id, Number(bonus.amount));
+      }
+    }
+
+    return monthlyBonusMap;
+  }
+
+  private findSalaryRecord(periodId: string, employeeId: string) {
+    return this.salaryRecordRepository.findOne({
+      where: {
+        employee: { id: employeeId },
+        salaryPeriod: { id: periodId },
+      },
+      relations: { employee: true, salaryPeriod: true },
+    });
+  }
+
+  private findMonthlyBonus(employeeId: string, month: number, year: number) {
+    return this.monthlyBonusRepository.findOne({
+      where: {
+        employee: { id: employeeId },
+        month,
+        year,
+      },
+      relations: { employee: true },
+    });
+  }
+
+  private async saveMonthlyBonus({
+    actor,
+    amount,
+    employee,
+    existingBonus,
+    month,
+    previousAmount,
+    writeHistory,
+    year,
+  }: {
+    actor?: SalaryChangeActor;
+    amount: number;
+    employee: Employee;
+    existingBonus: EmployeeMonthlyBonus | null;
+    month: number;
+    previousAmount: number;
+    writeHistory: boolean;
+    year: number;
+  }) {
+    if (Math.abs(amount - previousAmount) < 1) {
+      return;
+    }
+
+    const bonus = existingBonus ?? this.monthlyBonusRepository.create({ employee, month, year });
+    this.monthlyBonusRepository.merge(bonus, {
+      amount: String(amount),
+      changedByLoginCode: actor?.loginCode ?? null,
+      changedByUserId: actor?.id ?? null,
+    });
+    await this.monthlyBonusRepository.save(bonus);
+
+    if (writeHistory) {
+      await this.monthlyBonusHistoryRepository.save(
+        this.monthlyBonusHistoryRepository.create({
+          changedByLoginCode: actor?.loginCode ?? null,
+          changedByUserId: actor?.id ?? null,
+          employee,
+          month,
+          newBonus: String(amount),
+          previousBonus: String(previousAmount),
+          year,
+        }),
+      );
+    }
+  }
+
+  private async createDraftSalaryRecord({
+    employee,
+    month,
+    year,
+  }: {
+    employee: Employee;
+    month: number;
+    year: number;
+  }) {
+    const period =
+      (await this.salaryPeriodRepository.findOne({ where: { month, year } })) ??
+      (await this.salaryPeriodRepository.save(
+        this.salaryPeriodRepository.create({
+          month,
+          year,
+          status: "draft",
+        }),
+      ));
+
+    const record = this.salaryRecordRepository.create({
+      employee,
+      salaryPeriod: period,
+      configuredSalary: employee.baseSalary,
+      insuranceSalary: "0",
+      workDay: "0",
+      standardWorkDay: "0",
+      fixedDailySalary: "0",
+      responsibilityAllowance: "0",
+      mealAllowance: "0",
+      phoneAllowance: "0",
+      kpiAllowance: "0",
+      dailyTotal: "0",
+      overtimeWorkDay: "0",
+      totalWorkDay: "0",
+      baseSalary: "0",
+      allowanceTotal: "0",
+      bonusTotal: "0",
+      bonus: "0",
+      overtimeTotal: "0",
+      grossSalary: "0",
+      employerInsuranceTotal: "0",
+      insuranceTotal: "0",
+      totalInsurance: "0",
+      taxTotal: "0",
+      advanceTotal: "0",
+      deductionTotal: "0",
+      netSalary: "0",
+      status: period.status,
+    });
+
+    return this.salaryRecordRepository.save(record);
+  }
+
   private async findDocument(employeeId: string, documentId: string) {
     const document = await this.documentRepository.findOne({
       where: { id: documentId, employee: { id: employeeId } },
@@ -285,7 +566,7 @@ export class EmployeeService {
     );
   }
 
-  private toDto(employee: Employee) {
+  private toDto(employee: Employee, monthlyBonus = 0) {
     const primaryBankAccount = employee.bankAccounts?.find((bankAccount) => bankAccount.isPrimary);
 
     return {
@@ -309,6 +590,7 @@ export class EmployeeService {
       contractType: employee.contractType ?? undefined,
       shiftCount: employee.shiftCount,
       salary: Number(employee.baseSalary),
+      monthlyBonus,
       bankAccount: primaryBankAccount?.accountNumber,
       bankName: primaryBankAccount?.bankName,
       taxCode: employee.taxCode ?? undefined,
