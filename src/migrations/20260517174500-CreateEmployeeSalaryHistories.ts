@@ -27,18 +27,18 @@ export class CreateEmployeeSalaryHistories20260517174500 implements MigrationInt
       true,
     );
 
-    const table = await queryRunner.getTable("employee_salary_histories");
-    const hasEmployeeForeignKey = table?.foreignKeys.some(
-      (foreignKey) =>
-        foreignKey.columnNames.includes("employeeId") &&
-        foreignKey.referencedTableName === "employees" &&
-        foreignKey.referencedColumnNames.includes("id"),
+    const hasEmployeeForeignKey = await hasForeignKey(
+      queryRunner,
+      "employee_salary_histories",
+      "employeeId",
+      "employees",
+      "id",
     );
-
     if (!hasEmployeeForeignKey) {
       await queryRunner.createForeignKey(
         "employee_salary_histories",
         new TableForeignKey({
+          name: "FK_employee_salary_histories_employee",
           columnNames: ["employeeId"],
           referencedColumnNames: ["id"],
           referencedTableName: "employees",
@@ -51,4 +51,27 @@ export class CreateEmployeeSalaryHistories20260517174500 implements MigrationInt
   async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.dropTable("employee_salary_histories", true);
   }
+}
+
+async function hasForeignKey(
+  queryRunner: QueryRunner,
+  tableName: string,
+  columnName: string,
+  referencedTableName: string,
+  referencedColumnName: string,
+) {
+  const rows = await queryRunner.query(
+    `
+      SELECT CONSTRAINT_NAME
+      FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = ?
+        AND COLUMN_NAME = ?
+        AND REFERENCED_TABLE_NAME = ?
+        AND REFERENCED_COLUMN_NAME = ?
+      LIMIT 1
+    `,
+    [tableName, columnName, referencedTableName, referencedColumnName],
+  );
+  return Array.isArray(rows) && rows.length > 0;
 }

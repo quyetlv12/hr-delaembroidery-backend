@@ -40,7 +40,7 @@ export class CreateEmployeeMonthlyBonuses20260518113000 implements MigrationInte
         }),
       );
     }
-    await ensureEmployeeForeignKey(queryRunner, "employee_monthly_bonuses");
+    await ensureEmployeeForeignKey(queryRunner, "employee_monthly_bonuses", "FK_employee_monthly_bonuses_employee");
 
     const hasHistoryTable = await queryRunner.hasTable("employee_monthly_bonus_histories");
     if (!hasHistoryTable) {
@@ -78,7 +78,11 @@ export class CreateEmployeeMonthlyBonuses20260518113000 implements MigrationInte
         }),
       );
     }
-    await ensureEmployeeForeignKey(queryRunner, "employee_monthly_bonus_histories");
+    await ensureEmployeeForeignKey(
+      queryRunner,
+      "employee_monthly_bonus_histories",
+      "FK_employee_monthly_bonus_histories_employee",
+    );
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {
@@ -87,18 +91,13 @@ export class CreateEmployeeMonthlyBonuses20260518113000 implements MigrationInte
   }
 }
 
-async function ensureEmployeeForeignKey(queryRunner: QueryRunner, tableName: string) {
-  const table = await queryRunner.getTable(tableName);
-  const hasEmployeeForeignKey = table?.foreignKeys.some(
-    (foreignKey) =>
-      foreignKey.columnNames.includes("employeeId") &&
-      foreignKey.referencedTableName === "employees" &&
-      foreignKey.referencedColumnNames.includes("id"),
-  );
+async function ensureEmployeeForeignKey(queryRunner: QueryRunner, tableName: string, foreignKeyName: string) {
+  const hasEmployeeForeignKey = await hasForeignKey(queryRunner, tableName, "employeeId", "employees", "id");
   if (!hasEmployeeForeignKey) {
     await queryRunner.createForeignKey(
       tableName,
       new TableForeignKey({
+        name: foreignKeyName,
         columnNames: ["employeeId"],
         referencedColumnNames: ["id"],
         referencedTableName: "employees",
@@ -106,4 +105,27 @@ async function ensureEmployeeForeignKey(queryRunner: QueryRunner, tableName: str
       }),
     );
   }
+}
+
+async function hasForeignKey(
+  queryRunner: QueryRunner,
+  tableName: string,
+  columnName: string,
+  referencedTableName: string,
+  referencedColumnName: string,
+) {
+  const rows = await queryRunner.query(
+    `
+      SELECT CONSTRAINT_NAME
+      FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = ?
+        AND COLUMN_NAME = ?
+        AND REFERENCED_TABLE_NAME = ?
+        AND REFERENCED_COLUMN_NAME = ?
+      LIMIT 1
+    `,
+    [tableName, columnName, referencedTableName, referencedColumnName],
+  );
+  return Array.isArray(rows) && rows.length > 0;
 }
