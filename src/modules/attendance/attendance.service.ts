@@ -776,14 +776,28 @@ export class AttendanceService {
       employeeCode: summary.employee.employeeCode,
       employeeName: summary.employee.fullName,
       workDate: summary.workDate,
-      checkInAt: summary.checkInAt ?? undefined,
-      checkOutAt: summary.checkOutAt ?? undefined,
-      morningCheckInAt: summary.morningCheckInAt ?? parsedFallback?.morningCheckInAt ?? undefined,
-      morningCheckOutAt: summary.morningCheckOutAt ?? parsedFallback?.morningCheckOutAt ?? undefined,
-      afternoonCheckInAt: summary.afternoonCheckInAt ?? parsedFallback?.afternoonCheckInAt ?? undefined,
-      afternoonCheckOutAt: summary.afternoonCheckOutAt ?? parsedFallback?.afternoonCheckOutAt ?? undefined,
-      nightCheckInAt: summary.nightCheckInAt ?? parsedFallback?.nightCheckInAt ?? undefined,
-      nightCheckOutAt: summary.nightCheckOutAt ?? parsedFallback?.nightCheckOutAt ?? undefined,
+      checkInAt: toAttendanceDateTimeString(summary.workDate, parsedFallback?.times[0]) ?? toLocalDateTimeString(summary.checkInAt),
+      checkOutAt:
+        toAttendanceDateTimeString(summary.workDate, parsedFallback?.times[parsedFallback.times.length - 1]) ??
+        toLocalDateTimeString(summary.checkOutAt),
+      morningCheckInAt:
+        toAttendanceDateTimeString(summary.workDate, parsedFallback?.shifts.morningIn) ??
+        toLocalDateTimeString(summary.morningCheckInAt),
+      morningCheckOutAt:
+        toAttendanceDateTimeString(summary.workDate, parsedFallback?.shifts.morningOut) ??
+        toLocalDateTimeString(summary.morningCheckOutAt),
+      afternoonCheckInAt:
+        toAttendanceDateTimeString(summary.workDate, parsedFallback?.shifts.afternoonIn) ??
+        toLocalDateTimeString(summary.afternoonCheckInAt),
+      afternoonCheckOutAt:
+        toAttendanceDateTimeString(summary.workDate, parsedFallback?.shifts.afternoonOut) ??
+        toLocalDateTimeString(summary.afternoonCheckOutAt),
+      nightCheckInAt:
+        toAttendanceDateTimeString(summary.workDate, parsedFallback?.shifts.nightIn) ??
+        toLocalDateTimeString(summary.nightCheckInAt),
+      nightCheckOutAt:
+        toAttendanceDateTimeString(summary.workDate, parsedFallback?.shifts.nightOut) ??
+        toLocalDateTimeString(summary.nightCheckOutAt),
       lateMinutes: parsedFallback?.lateMinutes ?? summary.lateMinutes,
       earlyLeaveMinutes: parsedFallback?.earlyLeaveMinutes ?? summary.earlyLeaveMinutes,
       overtimeMinutes: parsedFallback?.overtimeMinutes ?? summary.overtimeMinutes,
@@ -1922,6 +1936,30 @@ function timeToMinutes(value: string) {
 
 function dateFromMinutes(year: number, month: number, day: number, minutes: number) {
   return new Date(year, month - 1, day, Math.floor(minutes / 60), minutes % 60);
+}
+
+function toAttendanceDateTimeString(workDate: string, time?: string) {
+  return time ? `${workDate}T${time}:00` : undefined;
+}
+
+function toLocalDateTimeString(value?: Date | string | null) {
+  if (!value) {
+    return undefined;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().replace(" ", "T");
+    return normalized ? normalized.slice(0, 19) : undefined;
+  }
+
+  if (Number.isNaN(value.getTime())) {
+    return undefined;
+  }
+
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(
+    2,
+    "0",
+  )}T${formatMinutes(value.getHours() * 60 + value.getMinutes())}:00`;
 }
 
 function formatMinutes(minutes: number) {
