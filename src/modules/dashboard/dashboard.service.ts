@@ -18,12 +18,13 @@ export class DashboardService {
   async getSummary(filter: DashboardFilter = {}) {
     const range = resolveRange(filter);
     const now = new Date();
-    const today = toDateString(now);
+    const today = toVietnamDateString(now);
 
     const [
       totalEmployees,
       activeEmployees,
       todayLateEmployees,
+      todayLateEmployeeRows,
       monthlyPayroll,
       overtimeMinutes,
       payrollByMonth,
@@ -35,6 +36,7 @@ export class DashboardService {
       this.countEmployees(filter),
       this.countActiveEmployees(filter),
       this.countTodayLate(filter, today),
+      this.getTodayLateEmployees(filter, today),
       this.sumPayroll(filter, range),
       this.sumOvertimeMinutes(filter, range),
       this.getPayrollByMonth(filter, range),
@@ -48,6 +50,7 @@ export class DashboardService {
       totalEmployees,
       activeEmployees,
       todayLateEmployees,
+      todayLateEmployeeRows,
       monthlyPayroll,
       overtimeHours: Math.round((overtimeMinutes / 60) * 10) / 10,
       payrollByMonth,
@@ -83,6 +86,36 @@ export class DashboardService {
         ...(filter.employeeId ? { employee: { id: filter.employeeId } } : {}),
       },
     });
+  }
+
+  private async getTodayLateEmployees(filter: DashboardFilter, today: string) {
+    const qb = this.attendanceRepository
+      .createQueryBuilder("attendance")
+      .leftJoinAndSelect("attendance.employee", "employee")
+      .leftJoinAndSelect("employee.department", "department")
+      .leftJoinAndSelect("employee.position", "position")
+      .where("attendance.workDate = :today", { today })
+      .andWhere("attendance.lateMinutes > 0")
+      .orderBy("attendance.lateMinutes", "DESC")
+      .addOrderBy("employee.employeeCode", "ASC");
+
+    if (filter.employeeId) {
+      qb.andWhere("employee.id = :employeeId", { employeeId: filter.employeeId });
+    }
+
+    const rows = await qb.getMany();
+    return rows.map((summary) => ({
+      employeeId: summary.employee.id,
+      employeeCode: summary.employee.employeeCode,
+      fullName: summary.employee.fullName,
+      avatarUrl: summary.employee.avatarUrl ?? null,
+      departmentName: summary.employee.department?.name ?? "Chưa phân bộ phận",
+      positionName: summary.employee.position?.name ?? "Chưa có chức vụ",
+      lateMinutes: Number(summary.lateMinutes ?? 0),
+      firstCheckInAt: formatVietnamTime(
+        summary.morningCheckInAt ?? summary.afternoonCheckInAt ?? summary.nightCheckInAt ?? summary.checkInAt,
+      ),
+    }));
   }
 
   // ── Sums ──────────────────────────────────────────────────────────────
@@ -312,9 +345,9 @@ export class DashboardService {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 function resolveRange(filter: DashboardFilter): { from: string; to: string } {
-  const now = new Date();
-  const defaultFrom = new Date(now.getFullYear(), now.getMonth() - 5, 1);
-  const defaultTo = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  const now = getVietnamDateParts(new Date());
+  const defaultFrom = new Date(Date.UTC(now.year, now.month - 6, 1));
+  const defaultTo = new Date(Date.UTC(now.year, now.month, 0));
 
   return {
     from: filter.from ?? toDateString(defaultFrom),
@@ -362,7 +395,8 @@ type CurrentShift = {
 };
 
 function resolveCurrentShift(settings: AttendanceSettingsForShift, now: Date): CurrentShift | null {
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const vietnamTime = new Date(now.getTime() + VIETNAM_TIMEZONE_OFFSET_MS);
+  const currentMinutes = vietnamTime.getUTCHours() * 60 + vietnamTime.getUTCMinutes();
   const morningStart = timeToMinutes(settings.morningStart);
   const morningEnd = timeToMinutes(settings.morningEnd);
   const afternoonStart = timeToMinutes(settings.afternoonStart);
@@ -439,4 +473,32 @@ function isWithinTimeRange(currentMinutes: number, startMinutes: number, endMinu
 function timeToMinutes(value: string) {
   const [hours, minutes] = value.split(":").map(Number);
   return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
+}
+
+const VIETNAM_TIMEZONE_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+function getVietnamDateParts(date: Date) {
+  const vietnamTime = new Date(date.getTime() + VIETNAM_TIMEZONE_OFFSET_MS);
+  return {
+    year: vietnamTime.getUTCFullYear(),
+    month: vietnamTime.getUTCMonth() + 1,
+    day: vietnamTime.getUTCDate(),
+  };
+}
+
+function formatVietnamTime(value?: Date | null) {
+  if (!value || Number.isNaN(value.getTime())) {
+    return null;
+  }
+
+  const vietnamTime = new Date(value.getTime() + VIETNAM_TIMEZONE_OFFSET_MS);
+  return `${String(vietnamTime.getUTCHours()).padStart(2, "0")}:${String(vietnamTime.getUTCMinutes()).padStart(
+    2,
+    "0",
+  )}`;
+}
+
+function toVietnamDateString(value: Date) {
+  const { year, month, day } = getVietnamDateParts(value);
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }

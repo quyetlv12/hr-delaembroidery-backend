@@ -199,6 +199,9 @@ const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettingsDto = {
   nightEnd: "21:00",
   overtimeRate: 1.5,
 };
+
+const VIETNAM_TIMEZONE_OFFSET_MINUTES = 7 * 60;
+const VIETNAM_TIMEZONE_OFFSET_MS = VIETNAM_TIMEZONE_OFFSET_MINUTES * 60 * 1000;
 export class AttendanceService {
   private readonly employeeRepository = AppDataSource.getRepository(Employee);
   private readonly holidayRepository = AppDataSource.getRepository(Holiday);
@@ -1935,7 +1938,7 @@ function timeToMinutes(value: string) {
 }
 
 function dateFromMinutes(year: number, month: number, day: number, minutes: number) {
-  return new Date(year, month - 1, day, Math.floor(minutes / 60), minutes % 60);
+  return new Date(Date.UTC(year, month - 1, day, Math.floor(minutes / 60), minutes % 60) - VIETNAM_TIMEZONE_OFFSET_MS);
 }
 
 function toAttendanceDateTimeString(workDate: string, time?: string) {
@@ -1949,17 +1952,33 @@ function toLocalDateTimeString(value?: Date | string | null) {
 
   if (typeof value === "string") {
     const normalized = value.trim().replace(" ", "T");
-    return normalized ? normalized.slice(0, 19) : undefined;
+    if (!normalized) {
+      return undefined;
+    }
+
+    return hasExplicitTimezone(normalized) ? toVietnamDateTimeString(new Date(normalized)) : normalized.slice(0, 19);
   }
 
   if (Number.isNaN(value.getTime())) {
     return undefined;
   }
 
-  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(
-    2,
-    "0",
-  )}T${formatMinutes(value.getHours() * 60 + value.getMinutes())}:00`;
+  return toVietnamDateTimeString(value);
+}
+
+function hasExplicitTimezone(value: string) {
+  return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+}
+
+function toVietnamDateTimeString(value: Date) {
+  if (Number.isNaN(value.getTime())) {
+    return undefined;
+  }
+
+  const vietnamTime = new Date(value.getTime() + VIETNAM_TIMEZONE_OFFSET_MS);
+  return `${vietnamTime.getUTCFullYear()}-${String(vietnamTime.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    vietnamTime.getUTCDate(),
+  ).padStart(2, "0")}T${formatMinutes(vietnamTime.getUTCHours() * 60 + vietnamTime.getUTCMinutes())}:00`;
 }
 
 function formatMinutes(minutes: number) {

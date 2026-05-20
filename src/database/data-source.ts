@@ -12,6 +12,7 @@ export const AppDataSource = new DataSource({
   password: env.DB_PASSWORD,
   database: env.DB_NAME,
   entities: Object.values(entities),
+  timezone: "+07:00",
   migrations: [
     process.env.NODE_ENV === "production" 
       ? "dist/migrations/*.js" 
