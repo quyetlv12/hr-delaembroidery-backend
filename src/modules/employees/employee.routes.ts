@@ -28,12 +28,14 @@ import {
   updateEmployeeController,
   updateEmployeeMonthlyBonusController,
   updateEmployeeSalaryController,
+  updateEmployeeTimekeepingCodeController,
 } from "./employee.controller";
 import {
   createEmployeeDto,
   increaseEmployeeSalaryDto,
   updateEmployeeMonthlyBonusDto,
   updateEmployeeSalaryDto,
+  updateEmployeeTimekeepingCodeDto,
 } from "./employee.dto";
 
 export const employeeRoutes = Router();
@@ -137,6 +139,12 @@ employeeRoutes.patch(
   permissionGuard(PERMISSIONS.employeesUpdate),
   validateBody(updateEmployeeSalaryDto),
   updateEmployeeSalaryController,
+);
+employeeRoutes.patch(
+  "/:id/timekeeping-code",
+  permissionGuard(PERMISSIONS.employeesUpdate),
+  validateBody(updateEmployeeTimekeepingCodeDto),
+  updateEmployeeTimekeepingCodeController,
 );
 employeeRoutes.patch(
   "/:id/monthly-bonus",

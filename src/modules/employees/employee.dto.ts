@@ -38,6 +38,12 @@ export const updateEmployeeSalaryDto = z.object({
   salary: z.coerce.number().min(0).max(1_000_000_000),
 });
 
+export const updateEmployeeTimekeepingCodeDto = z.object({
+  timekeepingCode: z
+    .preprocess((value) => (value === "" ? null : value), z.string().trim().max(50).nullable())
+    .optional(),
+});
+
 export const updateEmployeeMonthlyBonusDto = z.object({
   month: z.coerce.number().int().min(1).max(12),
   year: z.coerce.number().int().min(2000).max(2100),
@@ -53,5 +59,6 @@ export const increaseEmployeeSalaryDto = z.object({
 export type CreateEmployeeDto = z.infer<typeof createEmployeeDto>;
 export type UpdateEmployeeDto = CreateEmployeeDto;
 export type UpdateEmployeeSalaryDto = z.infer<typeof updateEmployeeSalaryDto>;
+export type UpdateEmployeeTimekeepingCodeDto = z.infer<typeof updateEmployeeTimekeepingCodeDto>;
 export type UpdateEmployeeMonthlyBonusDto = z.infer<typeof updateEmployeeMonthlyBonusDto>;
 export type IncreaseEmployeeSalaryDto = z.infer<typeof increaseEmployeeSalaryDto>;

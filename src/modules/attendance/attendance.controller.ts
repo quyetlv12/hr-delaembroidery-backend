@@ -5,15 +5,29 @@ import { HttpError } from "../../common/http-error";
 import { PERMISSIONS } from "../../config/permissions";
 import { AttendanceService } from "./attendance.service";
 import { resetAttendancePayrollPeriod } from "./attendance-reset.service";
+import { AttendanceServerManualSyncService } from "./attendance-server-manual-sync.service";
+import { AttendanceServerSettingsService } from "./attendance-server-settings.service";
+import { AttendanceServerStaffService } from "./attendance-server-staff.service";
+import { AttendanceServerSyncTestService } from "./attendance-server-sync-test.service";
+import { attendanceServerSavedStaffListDto } from "./attendance.dto";
 import type {
   AttendanceHolidaySettingsDto,
   AttendanceMonthSettingDto,
+  AttendanceServerManualSyncDto,
+  AttendanceServerBodyImportDto,
+  AttendanceServerStaffListDto,
+  AttendanceServerSettingsDto,
+  AttendanceServerSyncTestDto,
   AttendanceSettingsDto,
   ResetAttendancePayrollDto,
   UpdateAttendanceSummariesDto,
 } from "./attendance.dto";
 
 const attendanceService = new AttendanceService();
+const attendanceServerManualSyncService = new AttendanceServerManualSyncService();
+const attendanceServerSettingsService = new AttendanceServerSettingsService();
+const attendanceServerStaffService = new AttendanceServerStaffService();
+const attendanceServerSyncTestService = new AttendanceServerSyncTestService();
 
 export async function listAttendanceController(req: Request, res: Response) {
   const month = Number(req.query.month);
@@ -43,6 +57,19 @@ export async function updateAttendanceSettingsController(
 ) {
   const settings = await attendanceService.updateSettings(req.body);
   return ok(res, settings, "Đã cập nhật cấu hình chấm công");
+}
+
+export async function getAttendanceServerSettingsController(_req: Request, res: Response) {
+  const settings = await attendanceServerSettingsService.getSettings();
+  return ok(res, settings);
+}
+
+export async function updateAttendanceServerSettingsController(
+  req: Request<unknown, unknown, AttendanceServerSettingsDto>,
+  res: Response,
+) {
+  const settings = await attendanceServerSettingsService.updateSettings(req.body, req.user);
+  return ok(res, settings, "Đã lưu cookie máy chấm công");
 }
 
 export async function listAttendanceMonthSettingsController(req: Request, res: Response) {
@@ -120,7 +147,7 @@ export async function resetAttendancePayrollController(
   res: Response,
 ) {
   const result = await resetAttendancePayrollPeriod(req.body);
-  return ok(res, result, "Đã reset chấm công và bảng lương");
+  return ok(res, result, "Đã reset chấm công và bảng lương, giữ nguyên thưởng theo kỳ");
 }
 
 export async function updateAttendanceSummariesController(
@@ -129,4 +156,50 @@ export async function updateAttendanceSummariesController(
 ) {
   const result = await attendanceService.updateSummaries(req.body);
   return ok(res, result, "Đã cập nhật giờ chấm công");
+}
+
+export async function testAttendanceServerSyncController(
+  req: Request<unknown, unknown, AttendanceServerSyncTestDto>,
+  res: Response,
+) {
+  const result = await attendanceServerSyncTestService.test(req.body);
+  return ok(res, result, "Đã gọi thử API máy chấm công, chưa lưu dữ liệu");
+}
+
+export async function importAttendanceServerBodyController(
+  req: Request<unknown, unknown, AttendanceServerBodyImportDto>,
+  res: Response,
+) {
+  const result = await attendanceService.importServerBody(req.body);
+  return ok(res, result, "Đã nhập body máy chấm công vào bảng chấm công");
+}
+
+export async function manualSyncAttendanceServerController(
+  req: Request<unknown, unknown, AttendanceServerManualSyncDto>,
+  res: Response,
+) {
+  const result = await attendanceServerManualSyncService.sync(req.body);
+  return ok(res, result, "Đã đồng bộ thủ công dữ liệu từ máy chấm công");
+}
+
+export async function listAttendanceServerStaffController(
+  req: Request<unknown, unknown, AttendanceServerStaffListDto>,
+  res: Response,
+) {
+  const result = await attendanceServerSyncTestService.listStaff(req.body);
+  return ok(res, result, "Đã tải danh sách nhân viên từ máy chấm công");
+}
+
+export async function listSavedAttendanceServerStaffController(req: Request, res: Response) {
+  const query = attendanceServerSavedStaffListDto.parse(req.query);
+  const result = await attendanceServerStaffService.list(query);
+  return ok(res, result);
+}
+
+export async function syncAttendanceServerStaffController(
+  req: Request<unknown, unknown, AttendanceServerStaffListDto>,
+  res: Response,
+) {
+  const result = await attendanceServerStaffService.sync(req.body, req.user);
+  return ok(res, result, `Đã lưu ${result.savedRows} nhân viên máy chấm công`);
 }

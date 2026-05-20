@@ -15,6 +15,7 @@ import {
   listPayrollFormulaTemplatesController,
   listPayrollController,
   lockPayrollController,
+  restorePayrollBonusesController,
   revertPayrollFormulaHistoryController,
   revertPayrollRecordHistoryController,
   unlockPayrollController,
@@ -80,6 +81,12 @@ payrollRoutes.post(
   permissionGuard(PERMISSIONS.payrollCalculate),
   validateBody(payrollPeriodDto),
   calculatePayrollController,
+);
+payrollRoutes.post(
+  "/restore-bonuses",
+  permissionGuard(PERMISSIONS.payrollCalculate),
+  validateBody(payrollPeriodDto),
+  restorePayrollBonusesController,
 );
 payrollRoutes.patch(
   "/records/:id",

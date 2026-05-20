@@ -1,6 +1,6 @@
 import { HttpError } from "../../common/http-error";
 import { AppDataSource } from "../../database/data-source";
-import { PayrollFormulaSetting, PayrollRecordHistory, SalaryRecord } from "../../entities";
+import { EmployeeMonthlyBonus, PayrollFormulaSetting, PayrollRecordHistory, SalaryRecord } from "../../entities";
 import type { PayrollRecordSnapshot } from "../../entities/PayrollRecordHistory";
 import type { PayrollRecordUpdateDto } from "./payroll.dto";
 import { DEFAULT_PAYROLL_FORMULA_SETTING } from "./payroll-formula";
@@ -28,6 +28,7 @@ export class PayrollRecordEditService {
   private readonly recordRepository = AppDataSource.getRepository(SalaryRecord);
   private readonly recordHistoryRepository = AppDataSource.getRepository(PayrollRecordHistory);
   private readonly formulaSettingRepository = AppDataSource.getRepository(PayrollFormulaSetting);
+  private readonly monthlyBonusRepository = AppDataSource.getRepository(EmployeeMonthlyBonus);
 
   async updateRecord(recordId: string, dto: PayrollRecordUpdateDto, user?: PayrollAuditUser) {
     const record = await this.recordRepository.findOne({
@@ -69,6 +70,10 @@ export class PayrollRecordEditService {
           salaryRecord: savedRecord,
         }),
       );
+    }
+
+    if (touched.has("bonus")) {
+      await this.syncMonthlyBonus(savedRecord, state.bonus, user);
     }
 
     return {
@@ -129,6 +134,10 @@ export class PayrollRecordEditService {
           salaryRecord: savedRecord,
         }),
       );
+    }
+
+    if (changedFields.includes("bonus")) {
+      await this.syncMonthlyBonus(savedRecord, Number(savedRecord.bonus), user);
     }
 
     return {
@@ -342,6 +351,35 @@ export class PayrollRecordEditService {
       changedByLoginCode: history.changedByLoginCode ?? undefined,
       createdAt: history.createdAt,
     };
+  }
+
+  private async syncMonthlyBonus(record: SalaryRecord, amount: number, user?: PayrollAuditUser) {
+    const existingBonus = await this.monthlyBonusRepository.findOne({
+      where: {
+        employee: { id: record.employee.id },
+        month: record.salaryPeriod.month,
+        year: record.salaryPeriod.year,
+      },
+      relations: { employee: true },
+      withDeleted: true,
+    });
+
+    const bonus =
+      existingBonus ??
+      this.monthlyBonusRepository.create({
+        employee: record.employee,
+        month: record.salaryPeriod.month,
+        year: record.salaryPeriod.year,
+      });
+
+    this.monthlyBonusRepository.merge(bonus, {
+      amount: String(roundCurrency(amount)),
+      changedByLoginCode: user?.loginCode ?? null,
+      changedByUserId: user?.id ?? null,
+      deletedAt: null,
+    });
+
+    await this.monthlyBonusRepository.save(bonus);
   }
 }
 

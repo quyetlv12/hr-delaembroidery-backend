@@ -37,6 +37,7 @@ export async function resetAttendancePayrollPeriod(dto: ResetAttendancePayrollDt
           )
         : [];
     const salaryEmailLogIds = await selectSalaryEmailLogIds(manager, salaryPeriodIds, salaryRecordIds);
+    const preservedBonuses = await preserveMonthlyBonuses(manager, dto.month, dto.year);
 
     await deleteByIds(manager, "salary_email_logs", salaryEmailLogIds);
     await deleteByIds(manager, "salary_details", salaryDetailIds);
@@ -57,6 +58,7 @@ export async function resetAttendancePayrollPeriod(dto: ResetAttendancePayrollDt
       payrollRecords: salaryRecordIds.length,
       salaryDetails: salaryDetailIds.length,
       salaryEmailLogs: salaryEmailLogIds.length,
+      preservedBonuses,
     };
   });
 }
@@ -107,6 +109,87 @@ async function selectSalaryEmailLogIds(
   }
 
   return selectIds(manager, `SELECT id FROM salary_email_logs WHERE ${conditions.join(" OR ")}`, params);
+}
+
+async function preserveMonthlyBonuses(manager: EntityManager, month: number, year: number) {
+  if (
+    !(await tableExists(manager, "employee_monthly_bonuses")) ||
+    !(await tableExists(manager, "salary_records")) ||
+    !(await tableExists(manager, "salary_periods"))
+  ) {
+    return 0;
+  }
+
+  const updateResult = await manager.query(
+    `
+      UPDATE employee_monthly_bonuses bonus
+      INNER JOIN salary_records record
+        ON record.employeeId = bonus.employeeId
+      INNER JOIN salary_periods period
+        ON period.id = record.salaryPeriodId
+      SET
+        bonus.amount = record.bonus,
+        bonus.updated_at = CURRENT_TIMESTAMP,
+        bonus.deleted_at = NULL
+      WHERE period.month = ?
+        AND period.year = ?
+        AND bonus.month = ?
+        AND bonus.year = ?
+        AND CAST(record.bonus AS DECIMAL(15, 2)) <> 0
+    `,
+    [month, year, month, year],
+  );
+
+  const insertResult = await manager.query(
+    `
+      INSERT INTO employee_monthly_bonuses (
+        id,
+        employeeId,
+        month,
+        year,
+        amount,
+        created_at,
+        updated_at,
+        deleted_at
+      )
+      SELECT
+        UUID(),
+        record.employeeId,
+        period.month,
+        period.year,
+        record.bonus,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP,
+        NULL
+      FROM salary_records record
+      INNER JOIN salary_periods period
+        ON period.id = record.salaryPeriodId
+      LEFT JOIN employee_monthly_bonuses bonus
+        ON bonus.employeeId = record.employeeId
+        AND bonus.month = period.month
+        AND bonus.year = period.year
+      WHERE period.month = ?
+        AND period.year = ?
+        AND bonus.id IS NULL
+        AND CAST(record.bonus AS DECIMAL(15, 2)) <> 0
+    `,
+    [month, year],
+  );
+
+  return getAffectedRows(updateResult) + getAffectedRows(insertResult);
+}
+
+function getAffectedRows(result: unknown): number {
+  if (Array.isArray(result)) {
+    return result.reduce((total, item) => total + getAffectedRows(item), 0);
+  }
+
+  if (result && typeof result === "object" && "affectedRows" in result) {
+    const affectedRows = Number((result as { affectedRows?: unknown }).affectedRows);
+    return Number.isFinite(affectedRows) ? affectedRows : 0;
+  }
+
+  return 0;
 }
 
 function getMonthRange(month: number, year: number) {

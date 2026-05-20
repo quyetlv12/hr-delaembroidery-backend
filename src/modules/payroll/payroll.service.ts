@@ -9,6 +9,7 @@ import {
   AttendanceSummary,
   Deduction,
   Employee,
+  EmployeeMonthlyBonus,
   Holiday,
   PayrollFormulaHistory,
   PayrollFormulaSetting,
@@ -50,6 +51,7 @@ export class PayrollService {
   private readonly periodRepository = AppDataSource.getRepository(SalaryPeriod);
   private readonly recordRepository = AppDataSource.getRepository(SalaryRecord);
   private readonly detailRepository = AppDataSource.getRepository(SalaryDetail);
+  private readonly monthlyBonusRepository = AppDataSource.getRepository(EmployeeMonthlyBonus);
   private readonly formulaSettingRepository = AppDataSource.getRepository(PayrollFormulaSetting);
   private readonly formulaHistoryRepository = AppDataSource.getRepository(PayrollFormulaHistory);
   private readonly formulaTemplateRepository = AppDataSource.getRepository(PayrollFormulaTemplate);
@@ -122,6 +124,62 @@ export class PayrollService {
         overtimeRate,
         formulaSetting,
       });
+    }
+
+    return this.list(dto);
+  }
+
+  async restoreMonthlyBonuses(dto: PayrollPeriodDto) {
+    const period = await this.getOrCreatePeriod(dto.month, dto.year);
+    if (period.status === "locked") {
+      throw new HttpError(400, "PAYROLL_LOCKED", "Kỳ lương đã bị khóa");
+    }
+
+    const bonuses = await this.monthlyBonusRepository.find({
+      where: { month: dto.month, year: dto.year },
+      relations: { employee: true },
+    });
+    const activeBonuses = bonuses.filter((bonus) => Number(bonus.amount) !== 0);
+    const records = await this.recordRepository.find({
+      where: { salaryPeriod: { id: period.id } },
+      relations: { employee: true, salaryPeriod: true },
+    });
+
+    if (records.length === 0) {
+      if (activeBonuses.length > 0) {
+        await this.createBonusOnlyRecords(period, activeBonuses);
+        return this.list(dto);
+      }
+
+      return this.calculatePeriod(dto);
+    }
+
+    const bonusByEmployee = new Map(bonuses.map((bonus) => [bonus.employee.id, Number(bonus.amount)]));
+    const existingEmployeeIds = new Set(records.map((record) => record.employee.id));
+    const missingBonusRecords = activeBonuses.filter((bonus) => !existingEmployeeIds.has(bonus.employee.id));
+    if (missingBonusRecords.length > 0) {
+      await this.createBonusOnlyRecords(period, missingBonusRecords);
+    }
+
+    const changedRecords = records.flatMap((record) => {
+      if (record.status === "locked") {
+        throw new HttpError(400, "PAYROLL_LOCKED", "Kỳ lương đã bị khóa");
+      }
+
+      const restoredBonus = bonusByEmployee.get(record.employee.id);
+      if (restoredBonus === undefined || Number(record.bonus) === restoredBonus) {
+        return [];
+      }
+
+      record.bonus = String(restoredBonus);
+      record.netSalary = String(
+        roundCurrency(Math.max(0, Number(record.grossSalary) - Number(record.deductionTotal) + restoredBonus)),
+      );
+      return [record];
+    });
+
+    if (changedRecords.length > 0) {
+      await this.recordRepository.save(changedRecords);
     }
 
     return this.list(dto);
@@ -488,6 +546,14 @@ export class PayrollService {
       },
       relations: { employee: true, salaryPeriod: true },
     });
+    const monthlyBonus = await this.monthlyBonusRepository.findOne({
+      where: {
+        employee: { id: input.employee.id },
+        month: input.period.month,
+        year: input.period.year,
+      },
+    });
+    const manualBonus = existingRecord ? Number(existingRecord.bonus) : Number(monthlyBonus?.amount ?? 0);
     const record = existingRecord ?? this.recordRepository.create();
 
     this.recordRepository.merge(record, {
@@ -508,8 +574,9 @@ export class PayrollService {
       totalWorkDay: String(payrollFormula.totalWorkDay),
       allowanceTotal: String(payrollFormula.allowanceTotal),
       bonusTotal: String(payrollFormula.bonusTotal),
-      // bonus (thưởng) is set manually per employee — preserve existing value on recalculate
-      bonus: existingRecord ? existingRecord.bonus : "0",
+      // bonus (thưởng) is set manually per employee — preserve existing value on recalculate,
+      // or restore the monthly employee bonus when a record is recreated after attendance reset.
+      bonus: String(manualBonus),
       overtimeTotal: String(payrollFormula.overtimeSalary),
       grossSalary: String(payrollFormula.grossSalary),
       employerInsuranceTotal: String(payrollFormula.employerInsuranceTotal),
@@ -518,7 +585,7 @@ export class PayrollService {
       taxTotal: String(payrollFormula.personalIncomeTax),
       advanceTotal: String(payrollFormula.advanceTotal),
       deductionTotal: String(payrollFormula.totalDeduction),
-      netSalary: String(payrollFormula.netSalary + (existingRecord ? Number(existingRecord.bonus) : 0)),
+      netSalary: String(payrollFormula.netSalary + manualBonus),
       status: input.period.status,
     });
 
@@ -566,6 +633,65 @@ export class PayrollService {
           type: detail.type,
           label: detail.label,
           amount: String(detail.amount),
+        }),
+      ),
+    );
+	  }
+
+  private async createBonusOnlyRecords(period: SalaryPeriod, bonuses: EmployeeMonthlyBonus[]) {
+    if (bonuses.length === 0) {
+      return;
+    }
+
+    const [monthSetting, formulaSetting] = await Promise.all([
+      this.getPayrollMonthSetting(period.month, period.year),
+      this.getFormulaSetting(),
+    ]);
+    const standardWorkDay = monthSetting.standardWorkDay;
+    const insuranceSalary = Number(formulaSetting.insuranceBaseSalary);
+    const fixedDailySalary = standardWorkDay > 0 ? roundCurrency(insuranceSalary / standardWorkDay) : 0;
+    const records = bonuses.map((bonus) => {
+      const amount = roundCurrency(Number(bonus.amount));
+      return this.recordRepository.create({
+        employee: bonus.employee,
+        salaryPeriod: period,
+        baseSalary: "0",
+        configuredSalary: String(Number(bonus.employee.baseSalary ?? 0)),
+        insuranceSalary: String(insuranceSalary),
+        workDay: "0",
+        standardWorkDay: String(standardWorkDay),
+        fixedDailySalary: String(fixedDailySalary),
+        responsibilityAllowance: "0",
+        mealAllowance: "0",
+        phoneAllowance: "0",
+        kpiAllowance: "0",
+        dailyTotal: String(fixedDailySalary),
+        overtimeWorkDay: "0",
+        totalWorkDay: "0",
+        allowanceTotal: "0",
+        bonusTotal: "0",
+        bonus: String(amount),
+        overtimeTotal: "0",
+        grossSalary: "0",
+        employerInsuranceTotal: "0",
+        insuranceTotal: "0",
+        totalInsurance: "0",
+        taxTotal: "0",
+        advanceTotal: "0",
+        deductionTotal: "0",
+        netSalary: String(amount),
+        status: period.status,
+      });
+    });
+
+    const savedRecords = await this.recordRepository.save(records);
+    await this.detailRepository.save(
+      savedRecords.map((record) =>
+        this.detailRepository.create({
+          salaryRecord: record,
+          type: "bonus",
+          label: `Thưởng tháng ${String(period.month).padStart(2, "0")}/${period.year}`,
+          amount: record.bonus,
         }),
       ),
     );

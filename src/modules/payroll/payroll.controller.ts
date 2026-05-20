@@ -5,7 +5,12 @@ import { HttpError } from "../../common/http-error";
 import { PERMISSIONS } from "../../config/permissions";
 import { PayrollService } from "./payroll.service";
 import { PayrollRecordEditService } from "./payroll-record-edit.service";
-import type { PayrollFormulaSettingDto, PayrollFormulaTemplateCreateDto, PayrollRecordUpdateDto } from "./payroll.dto";
+import type {
+  PayrollFormulaSettingDto,
+  PayrollFormulaTemplateCreateDto,
+  PayrollPeriodDto,
+  PayrollRecordUpdateDto,
+} from "./payroll.dto";
 
 const payrollService = new PayrollService();
 const payrollRecordEditService = new PayrollRecordEditService();
@@ -33,6 +38,11 @@ export async function listPayrollController(req: Request, res: Response) {
 export async function calculatePayrollController(req: Request, res: Response) {
   const payroll = await payrollService.calculatePeriod(req.body);
   return ok(res, payroll, "Đã tính lương");
+}
+
+export async function restorePayrollBonusesController(req: Request<unknown, unknown, PayrollPeriodDto>, res: Response) {
+  const payroll = await payrollService.restoreMonthlyBonuses(req.body);
+  return ok(res, payroll, "Đã khôi phục thưởng theo kỳ");
 }
 
 export async function getPayrollFormulaSettingController(_req: Request, res: Response) {

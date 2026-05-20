@@ -20,6 +20,7 @@ import { getMonthRange, PayrollService } from "../payroll/payroll.service";
 import type {
   AttendanceHolidaySettingsDto,
   AttendanceMonthSettingDto,
+  AttendanceServerBodyImportDto,
   AttendanceSettingsDto,
   UpdateAttendanceSummariesDto,
   UpdateAttendanceSummaryRowDto,
@@ -176,6 +177,11 @@ type PayrollMonthSetting = {
   holidayPaidDays: number;
   holidayBonusAmount: number;
   holidayBonusTotal: number;
+};
+
+type YunattAdminBodyRow = Record<string, unknown> & {
+  staffName?: unknown;
+  staffNumber?: unknown;
 };
 
 const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettingsDto = {
@@ -338,10 +344,10 @@ export class AttendanceService {
       : [...attendanceEmployeeViewColumns];
     const totals = {
       rows: summaries.length,
-      workDay: roundNumber(sum(summaries.map((summary) => Number(summary.workDay)))),
-      lateMinutes: sum(summaries.map((summary) => summary.lateMinutes)),
-      earlyLeaveMinutes: sum(summaries.map((summary) => summary.earlyLeaveMinutes)),
-      overtimeMinutes: sum(summaries.map((summary) => summary.overtimeMinutes)),
+      workDay: roundNumber(sum(rows.map((row) => Number(row.workDay)))),
+      lateMinutes: sum(rows.map((row) => row.lateMinutes)),
+      earlyLeaveMinutes: sum(rows.map((row) => row.earlyLeaveMinutes)),
+      overtimeMinutes: sum(rows.map((row) => row.overtimeMinutes)),
     };
 
     return {
@@ -382,17 +388,101 @@ export class AttendanceService {
     });
   }
 
-  async updateSummaries(input: UpdateAttendanceSummariesDto) {
-    const ids = input.rows.map((row) => row.id);
-    const summaries = await this.summaryRepository.find({
-      where: { id: In(ids) },
-      relations: { employee: true },
-    });
+  async importServerBody(input: AttendanceServerBodyImportDto) {
+    const month = normalizeImportMonth(input.month);
+    if (month === undefined) {
+      throw new HttpError(400, "INVALID_ATTENDANCE_PERIOD", "Vui lòng chọn tháng chấm công");
+    }
+    const year = normalizeImportYear(input.year);
+    const schedule = await this.getShiftSchedule();
+    const rows = parseYunattAdminBodyRows(input.body);
+    const employees = await this.employeeRepository.find({ relations: { department: true, position: true } });
+    const employeeMap = createEmployeeMap(employees);
+    const previewRows: AttendancePreviewRow[] = [];
 
-    if (summaries.length !== ids.length) {
+    for (const rawRow of rows) {
+      const staffNumber = stringCell(rawRow.staffNumber);
+      const staffName = stringCell(rawRow.staffName);
+      const matchedEmployee = staffNumber ? employeeMap.byCode.get(normalizeKey(staffNumber)) : undefined;
+      const shiftCount = matchedEmployee?.shiftCount ?? 2;
+      const days = buildPreviewDaysFromYunattRow(rawRow, year, month, shiftCount, schedule);
+
+      if (days.length === 0) {
+        continue;
+      }
+
+      previewRows.push({
+        employeeCode: staffNumber,
+        employeeName: staffName,
+        matchedEmployeeId: matchedEmployee?.id,
+        matchedEmployeeCode: matchedEmployee?.employeeCode,
+        matchedEmployeeName: matchedEmployee?.fullName,
+        days,
+      });
+    }
+
+    if (previewRows.length === 0) {
+      throw new HttpError(422, "NO_ATTENDANCE_IMPORTED", "Body admin không có dữ liệu chấm công trong kỳ đã chọn");
+    }
+
+    return this.commitPreviewRows({
+      month,
+      year,
+      fileName: input.fileName || `yunatt-admin-body-${year}-${String(month).padStart(2, "0")}.json`,
+      autoCreateMissingEmployees: false,
+      rows: previewRows,
+    });
+  }
+
+  async updateSummaries(input: UpdateAttendanceSummariesDto) {
+    const rowsWithId = input.rows.filter((row): row is UpdateAttendanceSummaryRowDto & { id: string } =>
+      Boolean(row.id),
+    );
+    const rowsWithoutId = input.rows.filter((row) => !row.id);
+    const ids = rowsWithId.map((row) => row.id);
+    const existingSummaries =
+      ids.length > 0
+        ? await this.summaryRepository.find({
+            where: { id: In(ids) },
+            relations: { employee: true },
+          })
+        : [];
+
+    if (existingSummaries.length !== ids.length) {
       throw new HttpError(404, "ATTENDANCE_SUMMARY_NOT_FOUND", "Không tìm thấy dòng chấm công");
     }
 
+    const employeeIds = Array.from(
+      new Set(rowsWithoutId.map((row) => row.employeeId).filter((employeeId): employeeId is string => Boolean(employeeId))),
+    );
+    const employees =
+      employeeIds.length > 0 ? await this.employeeRepository.find({ where: { id: In(employeeIds) } }) : [];
+    const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
+    const newSummaries = rowsWithoutId.map((row) => {
+      const employee = row.employeeId ? employeeMap.get(row.employeeId) : undefined;
+      if (!employee || !row.workDate) {
+        throw new HttpError(404, "EMPLOYEE_NOT_FOUND", "Không tìm thấy nhân viên để tạo dòng chấm công");
+      }
+
+      return this.summaryRepository.create({
+        employee,
+        workDate: row.workDate,
+        checkInAt: null,
+        checkOutAt: null,
+        morningCheckInAt: null,
+        morningCheckOutAt: null,
+        afternoonCheckInAt: null,
+        afternoonCheckOutAt: null,
+        nightCheckInAt: null,
+        nightCheckOutAt: null,
+        lateMinutes: 0,
+        earlyLeaveMinutes: 0,
+        overtimeMinutes: 0,
+        workDay: "0",
+        status: "missing_punch",
+      });
+    });
+    const summaries = [...existingSummaries, ...newSummaries];
     const periods = new Set(summaries.map((summary) => getPeriodKey(summary.workDate)));
     if (periods.size !== 1) {
       throw new HttpError(400, "INVALID_ATTENDANCE_PERIOD", "Chỉ được cập nhật dữ liệu trong cùng một kỳ công");
@@ -409,10 +499,14 @@ export class AttendanceService {
       throw new HttpError(400, "PAYROLL_LOCKED", "Kỳ lương đã khóa, không thể sửa chấm công");
     }
 
-    const rowInputMap = new Map(input.rows.map((row) => [row.id, row]));
+    const rowInputMap = new Map(rowsWithId.map((row) => [row.id, row]));
+    const rowInputByEmployeeDate = new Map(
+      rowsWithoutId.map((row) => [`${row.employeeId}:${row.workDate}`, row] as const),
+    );
     const schedule = await this.getShiftSchedule();
     const updatedSummaries = summaries.map((summary) => {
-      const rowInput = rowInputMap.get(summary.id);
+      const rowInput =
+        rowInputMap.get(summary.id) ?? rowInputByEmployeeDate.get(`${summary.employee.id}:${summary.workDate}`);
       if (!rowInput) {
         return summary;
       }
@@ -423,7 +517,13 @@ export class AttendanceService {
 
     const savedSummaries = await this.summaryRepository.save(updatedSummaries);
     await Promise.all(
-      savedSummaries.map((summary) => this.upsertManualAttendanceLog(summary, rowInputMap.get(summary.id), schedule)),
+      savedSummaries.map((summary) =>
+        this.upsertManualAttendanceLog(
+          summary,
+          rowInputMap.get(summary.id) ?? rowInputByEmployeeDate.get(`${summary.employee.id}:${summary.workDate}`),
+          schedule,
+        ),
+      ),
     );
     await this.payrollService.calculatePeriod({ month, year });
 
@@ -474,7 +574,7 @@ export class AttendanceService {
         continue;
       }
 
-      let employee = employeeMap.byCode.get(normalizeKey(rawCode)) ?? employeeMap.byName.get(normalizeKey(rawName));
+      let employee = employeeMap.byCode.get(normalizeKey(rawCode));
       if (!employee && options.autoCreateMissingEmployees !== false && rawCode && rawName) {
         employee = await this.createImportedEmployee(rawCode, rawName, importYear, importMonth);
         employees.push(employee);
@@ -678,11 +778,11 @@ export class AttendanceService {
       afternoonCheckOutAt: summary.afternoonCheckOutAt ?? parsedFallback?.afternoonCheckOutAt ?? undefined,
       nightCheckInAt: summary.nightCheckInAt ?? parsedFallback?.nightCheckInAt ?? undefined,
       nightCheckOutAt: summary.nightCheckOutAt ?? parsedFallback?.nightCheckOutAt ?? undefined,
-      lateMinutes: summary.lateMinutes,
-      earlyLeaveMinutes: summary.earlyLeaveMinutes,
-      overtimeMinutes: summary.overtimeMinutes,
-      workDay: Number(summary.workDay),
-      status: summary.status,
+      lateMinutes: parsedFallback?.lateMinutes ?? summary.lateMinutes,
+      earlyLeaveMinutes: parsedFallback?.earlyLeaveMinutes ?? summary.earlyLeaveMinutes,
+      overtimeMinutes: parsedFallback?.overtimeMinutes ?? summary.overtimeMinutes,
+      workDay: parsedFallback?.workDay ?? Number(summary.workDay),
+      status: parsedFallback?.status ?? summary.status,
     };
   }
 
@@ -797,8 +897,7 @@ export class AttendanceService {
         continue;
       }
 
-      const matchedEmployee =
-        employeeMap.byCode.get(normalizeKey(rawCode)) ?? employeeMap.byName.get(normalizeKey(rawName));
+      const matchedEmployee = employeeMap.byCode.get(normalizeKey(rawCode));
       const shiftCount = matchedEmployee?.shiftCount ?? 2;
       const days = dateColumns
         .map((column) => {
@@ -868,8 +967,7 @@ export class AttendanceService {
   ): Promise<AttendancePayrollPreview> {
     const standardWorkDay = monthSetting.standardWorkDay;
     const records = previewRows.map((row) => {
-      const employee =
-        employeeMap.byCode.get(normalizeKey(row.employeeCode)) ?? employeeMap.byName.get(normalizeKey(row.employeeName));
+      const employee = employeeMap.byCode.get(normalizeKey(row.employeeCode));
       const configuredSalary = Number(employee?.baseSalary ?? 0);
       const workDay = sum(row.days.map((day) => Number(day.workDay)));
 
@@ -916,8 +1014,7 @@ export class AttendanceService {
         continue;
       }
 
-      let employee =
-        employeeMap.byCode.get(normalizeKey(row.employeeCode)) ?? employeeMap.byName.get(normalizeKey(row.employeeName));
+      let employee = employeeMap.byCode.get(normalizeKey(row.employeeCode));
       if (!employee && input.autoCreateMissingEmployees !== false && row.employeeCode && row.employeeName) {
         employee = await this.createImportedEmployee(row.employeeCode, row.employeeName, input.year, input.month);
         employees.push(employee);
@@ -1252,20 +1349,27 @@ function parseAttendanceCell(
     sessions.afternoonOut === null ? null : dateFromMinutes(year, month, day, sessions.afternoonOut);
   const nightCheckInAt = sessions.nightIn === null ? null : dateFromMinutes(year, month, day, sessions.nightIn);
   const nightCheckOutAt = sessions.nightOut === null ? null : dateFromMinutes(year, month, day, sessions.nightOut);
-  const hasNightShift = shiftCount >= 3;
-  const lateMinutes = isFullDayLeave
+  const hasNightShift = shiftCount >= 3 || sessions.nightIn !== null || sessions.nightOut !== null;
+  const rawLateMinutes = isFullDayLeave
     ? 0
     : getLateMinutes(sessions.morningIn, schedule.morningStart) +
       getLateMinutes(sessions.afternoonIn, schedule.afternoonStart) +
       (hasNightShift ? getLateMinutes(sessions.nightIn, schedule.nightStart) : 0);
-  const earlyLeaveMinutes = isFullDayLeave
+  const rawEarlyLeaveMinutes = isFullDayLeave
     ? 0
     : getEarlyLeaveMinutes(sessions.morningOut, schedule.morningEnd) +
       getEarlyLeaveMinutes(sessions.afternoonOut, schedule.afternoonEnd) +
       (hasNightShift ? getEarlyLeaveMinutes(sessions.nightOut, schedule.nightEnd) : 0);
-  const overtimeCheckOut = hasNightShift ? sessions.nightOut : sessions.afternoonOut;
-  const overtimeEnd = hasNightShift ? schedule.nightEnd : schedule.afternoonEnd;
-  const overtimeMinutes = overtimeCheckOut === null || isFullDayLeave ? 0 : Math.max(0, overtimeCheckOut - overtimeEnd);
+  const overtimeCheckOut = sessions.nightOut !== null ? sessions.nightOut : sessions.afternoonOut;
+  const overtimeEnd = sessions.nightOut !== null ? schedule.nightEnd : schedule.afternoonEnd;
+  const rawOvertimeMinutes = overtimeCheckOut === null || isFullDayLeave ? 0 : Math.max(0, overtimeCheckOut - overtimeEnd);
+  const metrics = isFullDayLeave
+    ? { lateMinutes: 0, earlyLeaveMinutes: 0, overtimeMinutes: 0, workDay: 1 }
+    : calculateAttendanceMetrics(sessions, shiftCount, schedule, {
+        lateMinutes: rawLateMinutes,
+        earlyLeaveMinutes: rawEarlyLeaveMinutes,
+        overtimeMinutes: rawOvertimeMinutes,
+      });
 
   return {
     hasData,
@@ -1286,12 +1390,89 @@ function parseAttendanceCell(
     afternoonCheckOutAt,
     nightCheckInAt,
     nightCheckOutAt,
-    lateMinutes,
-    earlyLeaveMinutes,
-    overtimeMinutes,
-    workDay: isFullDayLeave ? 1 : sessions.workDay,
+    lateMinutes: metrics.lateMinutes,
+    earlyLeaveMinutes: metrics.earlyLeaveMinutes,
+    overtimeMinutes: metrics.overtimeMinutes,
+    workDay: metrics.workDay,
     status: !hasData ? "missing_punch" : isFullDayLeave ? "leave" : sessions.isMissingPunch ? "missing_punch" : "present",
   };
+}
+
+function parseYunattAdminBodyRows(body: unknown): YunattAdminBodyRow[] {
+  const parsedBody = typeof body === "string" ? parseJsonBody(body) : body;
+  const rows = Array.isArray(parsedBody) ? parsedBody : isRecord(parsedBody) ? parsedBody.rows : undefined;
+
+  if (!Array.isArray(rows)) {
+    throw new HttpError(422, "INVALID_YUNATT_BODY", "Body admin phải có dạng JSON chứa mảng rows");
+  }
+
+  return rows.filter(isRecord) as YunattAdminBodyRow[];
+}
+
+function parseJsonBody(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new HttpError(422, "INVALID_YUNATT_BODY", "Body admin không phải JSON hợp lệ");
+  }
+}
+
+function buildPreviewDaysFromYunattRow(
+  row: YunattAdminBodyRow,
+  year: number,
+  month: number,
+  shiftCount: number,
+  schedule: ShiftSchedule,
+): AttendancePreviewDay[] {
+  return Object.entries(row)
+    .map(([key, value]) => {
+      const matchedDate = key.match(/^day-(\d{4})-(\d{2})-(\d{2})$/);
+      if (!matchedDate) {
+        return null;
+      }
+
+      const rowYear = Number(matchedDate[1]);
+      const rowMonth = Number(matchedDate[2]);
+      const rowDay = Number(matchedDate[3]);
+      if (rowYear !== year || rowMonth !== month || rowDay < 1 || rowDay > 31) {
+        return null;
+      }
+
+      const cellValue = normalizeYunattDayValue(value);
+      const parsedCell = parseAttendanceCell(cellValue, year, month, rowDay, shiftCount, schedule);
+      if (!parsedCell.hasData) {
+        return null;
+      }
+
+      return {
+        date: formatDate(year, month, rowDay),
+        column: `${String(month).padStart(2, "0")}-${String(rowDay).padStart(2, "0")}`,
+        value: cellValue,
+        times: parsedCell.times,
+        workDay: parsedCell.workDay,
+        lateMinutes: parsedCell.lateMinutes,
+        earlyLeaveMinutes: parsedCell.earlyLeaveMinutes,
+        overtimeMinutes: parsedCell.overtimeMinutes,
+        status: parsedCell.status,
+      };
+    })
+    .filter((day): day is AttendancePreviewDay => day !== null)
+    .sort((left, right) => left.date.localeCompare(right.date));
+}
+
+function normalizeYunattDayValue(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map(stringCell).filter(Boolean).join("\n");
+  }
+
+  return stringCell(value)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\n{2,}/g, "\n");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function buildShiftSessions(times: number[], shiftCount = 2, schedule: ShiftSchedule): ShiftSessions {
@@ -1318,9 +1499,19 @@ function buildShiftSessions(times: number[], shiftCount = 2, schedule: ShiftSche
     return buildGroupedThreeShiftSessions(times, schedule);
   }
 
+  const nightAwareSessions = buildNightAwareTwoShiftSessions(times, schedule);
+  if (nightAwareSessions) {
+    return nightAwareSessions;
+  }
+
   const groupedSessions = buildGroupedTwoShiftSessions(times, schedule);
   if (groupedSessions) {
     return groupedSessions;
+  }
+
+  const firstLastSession = buildFirstLastTwoShiftSession(times, schedule);
+  if (firstLastSession) {
+    return firstLastSession;
   }
 
   if (times.length >= 4) {
@@ -1396,6 +1587,107 @@ function buildShiftSessions(times: number[], shiftCount = 2, schedule: ShiftSche
   return sessions;
 }
 
+function buildFirstLastTwoShiftSession(times: number[], schedule: ShiftSchedule): ShiftSessions | null {
+  const first = times[0];
+  const last = times[times.length - 1];
+  if (first === undefined || last === undefined) {
+    return null;
+  }
+
+  const expectedWorkMinutes = getExpectedTwoDayShiftMinutes(schedule);
+  const workedMinutes = getFirstLastTwoShiftWorkedMinutes(first, last, schedule);
+  if (expectedWorkMinutes <= 0 || workedMinutes < expectedWorkMinutes) {
+    return null;
+  }
+
+  return {
+    morningIn: first,
+    morningOut: null,
+    afternoonIn: null,
+    afternoonOut: last,
+    nightIn: null,
+    nightOut: null,
+    workDay: 1,
+    isMissingPunch: false,
+  };
+}
+
+function calculateAttendanceMetrics(
+  sessions: ShiftSessions,
+  shiftCount: number,
+  schedule: ShiftSchedule,
+  rawMetrics: Pick<ParsedAttendanceCell, "lateMinutes" | "earlyLeaveMinutes" | "overtimeMinutes">,
+) {
+  if (shiftCount > 2 || sessions.nightIn !== null || sessions.nightOut !== null || sessions.isMissingPunch) {
+    return { ...rawMetrics, workDay: sessions.workDay };
+  }
+
+  const expectedWorkMinutes = getExpectedTwoDayShiftMinutes(schedule);
+  const workedMinutes = getWorkedTwoDayShiftMinutes(sessions, schedule);
+  if (expectedWorkMinutes <= 0 || workedMinutes <= 0) {
+    return { ...rawMetrics, workDay: sessions.workDay };
+  }
+
+  const baseWorkedMinutes = Math.max(0, expectedWorkMinutes - rawMetrics.lateMinutes - rawMetrics.earlyLeaveMinutes);
+  let compensationMinutes = Math.max(0, workedMinutes - baseWorkedMinutes);
+  const lateCompensationMinutes = Math.min(rawMetrics.lateMinutes, compensationMinutes);
+  const lateMinutes = rawMetrics.lateMinutes - lateCompensationMinutes;
+  compensationMinutes -= lateCompensationMinutes;
+  const earlyLeaveCompensationMinutes = Math.min(rawMetrics.earlyLeaveMinutes, compensationMinutes);
+  const earlyLeaveMinutes = rawMetrics.earlyLeaveMinutes - earlyLeaveCompensationMinutes;
+
+  return {
+    lateMinutes,
+    earlyLeaveMinutes,
+    overtimeMinutes: Math.max(0, workedMinutes - expectedWorkMinutes),
+    workDay: Math.min(1, roundNumber(workedMinutes / expectedWorkMinutes)),
+  };
+}
+
+function getExpectedTwoDayShiftMinutes(schedule: ShiftSchedule) {
+  return Math.max(0, schedule.morningEnd - schedule.morningStart) + Math.max(0, schedule.afternoonEnd - schedule.afternoonStart);
+}
+
+function getFirstLastTwoShiftWorkedMinutes(first: number, last: number, schedule: ShiftSchedule) {
+  const breakMinutes =
+    first < schedule.afternoonStart && last > schedule.morningEnd
+      ? Math.max(0, schedule.afternoonStart - schedule.morningEnd)
+      : 0;
+  return Math.max(0, last - Math.max(first, schedule.morningStart) - breakMinutes);
+}
+
+function getWorkedTwoDayShiftMinutes(sessions: ShiftSessions, schedule: ShiftSchedule) {
+  const hasFullDayWithoutLunchPunches =
+    sessions.morningIn !== null &&
+    sessions.morningOut === null &&
+    sessions.afternoonIn === null &&
+    sessions.afternoonOut !== null;
+
+  if (hasFullDayWithoutLunchPunches) {
+    const morningIn = sessions.morningIn;
+    const afternoonOut = sessions.afternoonOut;
+    if (morningIn === null || afternoonOut === null) {
+      return 0;
+    }
+
+    const breakMinutes = Math.max(0, schedule.afternoonStart - schedule.morningEnd);
+    return Math.max(0, afternoonOut - Math.max(morningIn, schedule.morningStart) - breakMinutes);
+  }
+
+  return (
+    getWorkedShiftMinutes(sessions.morningIn, sessions.morningOut, schedule.morningStart) +
+    getWorkedShiftMinutes(sessions.afternoonIn, sessions.afternoonOut, schedule.afternoonStart)
+  );
+}
+
+function getWorkedShiftMinutes(checkIn: number | null, checkOut: number | null, expectedStart: number) {
+  if (checkIn === null || checkOut === null) {
+    return 0;
+  }
+
+  return Math.max(0, checkOut - Math.max(checkIn, expectedStart));
+}
+
 function buildGroupedTwoShiftSessions(times: number[], schedule: ShiftSchedule): ShiftSessions | null {
   const morningTimes = times.filter((time) => time < schedule.lunchSplit);
   const afternoonTimes = times.filter((time) => time >= schedule.lunchSplit);
@@ -1417,9 +1709,11 @@ function buildGroupedTwoShiftSessions(times: number[], schedule: ShiftSchedule):
 }
 
 function buildGroupedThreeShiftSessions(times: number[], schedule: ShiftSchedule): ShiftSessions {
-  const morningTimes = times.filter((time) => time < schedule.lunchSplit);
-  const afternoonTimes = times.filter((time) => time >= schedule.lunchSplit && time < schedule.dinnerSplit);
-  const nightTimes = times.filter((time) => time >= schedule.dinnerSplit);
+  const extractedNight = extractNightShiftTail(times, schedule);
+  const remainingTimes = extractedNight ? extractedNight.remainingTimes : times;
+  const morningTimes = remainingTimes.filter((time) => time < schedule.lunchSplit);
+  const afternoonTimes = remainingTimes.filter((time) => time >= schedule.lunchSplit && time < schedule.dinnerSplit);
+  const nightTimes = extractedNight?.nightTimes ?? remainingTimes.filter((time) => time >= schedule.dinnerSplit);
   const shiftGroups = [morningTimes, afternoonTimes, nightTimes];
   const completeShiftCount = shiftGroups.filter((group) => group.length >= 2).length;
   const partialShiftCount = shiftGroups.filter((group) => group.length === 1).length;
@@ -1433,6 +1727,98 @@ function buildGroupedThreeShiftSessions(times: number[], schedule: ShiftSchedule
     nightOut: nightTimes.length >= 2 ? nightTimes[nightTimes.length - 1] ?? null : null,
     workDay: roundNumber(completeShiftCount / 3 + partialShiftCount / 6),
     isMissingPunch: completeShiftCount < 3 || partialShiftCount > 0,
+  };
+}
+
+function buildNightAwareTwoShiftSessions(times: number[], schedule: ShiftSchedule): ShiftSessions | null {
+  const extractedNight = extractNightShiftTail(times, schedule);
+  if (!extractedNight) {
+    return null;
+  }
+
+  const remainingTimes = extractedNight.remainingTimes;
+  const sessions: ShiftSessions = {
+    morningIn: null,
+    morningOut: null,
+    afternoonIn: null,
+    afternoonOut: null,
+    nightIn: extractedNight.nightTimes[0] ?? null,
+    nightOut: extractedNight.nightTimes[extractedNight.nightTimes.length - 1] ?? null,
+    workDay: 0,
+    isMissingPunch: false,
+  };
+
+  const usedIndexes = new Set<number>();
+  const morningIndexes = remainingTimes
+    .map((time, index) => ({ time, index }))
+    .filter(({ time }) => time < schedule.lunchSplit);
+  if (morningIndexes.length >= 2) {
+    const first = morningIndexes[0];
+    const last = morningIndexes[morningIndexes.length - 1];
+    sessions.morningIn = first?.time ?? null;
+    sessions.morningOut = last?.time ?? null;
+    if (first) {
+      usedIndexes.add(first.index);
+    }
+    if (last) {
+      usedIndexes.add(last.index);
+    }
+  } else if (morningIndexes.length === 1) {
+    const first = morningIndexes[0];
+    const next = remainingTimes.find((time, index) => index > first.index && time < schedule.afternoonEnd);
+    sessions.morningIn = first.time;
+    sessions.morningOut = next ?? null;
+    usedIndexes.add(first.index);
+    if (next !== undefined) {
+      usedIndexes.add(remainingTimes.indexOf(next));
+    }
+  }
+
+  const afternoonTimes = remainingTimes.filter(
+    (time, index) => !usedIndexes.has(index) && time >= schedule.lunchSplit && time < schedule.afternoonEnd,
+  );
+  if (afternoonTimes.length >= 2) {
+    sessions.afternoonIn = afternoonTimes[0] ?? null;
+    sessions.afternoonOut = afternoonTimes[afternoonTimes.length - 1] ?? null;
+  } else if (afternoonTimes.length === 1) {
+    sessions.afternoonIn = afternoonTimes[0] ?? null;
+  }
+
+  const groups = [
+    [sessions.morningIn, sessions.morningOut],
+    [sessions.afternoonIn, sessions.afternoonOut],
+    [sessions.nightIn, sessions.nightOut],
+  ];
+  const completeShiftCount = groups.filter(([checkIn, checkOut]) => checkIn !== null && checkOut !== null).length;
+  const partialShiftCount = groups.filter(
+    ([checkIn, checkOut]) => (checkIn !== null && checkOut === null) || (checkIn === null && checkOut !== null),
+  ).length;
+
+  sessions.workDay = Math.min(1, roundNumber(completeShiftCount / 2 + partialShiftCount / 4));
+  sessions.isMissingPunch = partialShiftCount > 0 || completeShiftCount === 0;
+  return sessions;
+}
+
+function extractNightShiftTail(times: number[], schedule: ShiftSchedule) {
+  if (times.length < 2) {
+    return null;
+  }
+
+  const lastIndex = times.length - 1;
+  const nightOut = times[lastIndex];
+  const nightIn = times[lastIndex - 1];
+  if (
+    nightOut === undefined ||
+    nightIn === undefined ||
+    nightOut < schedule.nightStart ||
+    nightIn < schedule.afternoonEnd - 30
+  ) {
+    return null;
+  }
+
+  return {
+    nightTimes: [nightIn, nightOut],
+    remainingTimes: times.slice(0, -2),
   };
 }
 

@@ -22,6 +22,7 @@ import type {
   UpdateEmployeeDto,
   UpdateEmployeeMonthlyBonusDto,
   UpdateEmployeeSalaryDto,
+  UpdateEmployeeTimekeepingCodeDto,
 } from "./employee.dto";
 import { EmployeeRepository } from "./employee.repository";
 
@@ -113,6 +114,26 @@ export class EmployeeService {
     });
     await this.payrollService.recalculateUnlockedPeriodsForEmployee(id);
     return this.toDto(employee);
+  }
+
+  async updateTimekeepingCode(id: string, dto: UpdateEmployeeTimekeepingCodeDto) {
+    const employee = await this.ensureEmployeeExists(id);
+    const nextCode = dto.timekeepingCode?.trim() || null;
+    if (nextCode) {
+      const duplicatedEmployee = await this.employeeOrmRepository.findOne({ where: { timekeepingCode: nextCode } });
+      if (duplicatedEmployee && duplicatedEmployee.id !== employee.id) {
+        throw new HttpError(
+          409,
+          "EMPLOYEE_TIMEKEEPING_CODE_DUPLICATED",
+          "ID máy chấm công đã được gán cho nhân viên khác",
+        );
+      }
+    }
+
+    employee.timekeepingCode = nextCode;
+    await this.employeeOrmRepository.save(employee);
+    const reloadedEmployee = await this.employeeRepository.findById(employee.id);
+    return this.toDto(reloadedEmployee ?? employee);
   }
 
   async updateMonthlyBonus(id: string, dto: UpdateEmployeeMonthlyBonusDto, actor?: SalaryChangeActor) {
@@ -347,7 +368,6 @@ export class EmployeeService {
     const employeeIds = employees.map((employee) => employee.id);
     const monthlyBonusMap = new Map<string, number>();
     const period = await this.salaryPeriodRepository.findOne({ where: { month, year } });
-    const isLockedPeriod = period?.status === "locked";
     if (period) {
       const records = await this.salaryRecordRepository.find({
         where: {
@@ -370,9 +390,7 @@ export class EmployeeService {
       relations: { employee: true },
     });
     for (const bonus of bonuses) {
-      if (isLockedPeriod || !monthlyBonusMap.has(bonus.employee.id)) {
-        monthlyBonusMap.set(bonus.employee.id, Number(bonus.amount));
-      }
+      monthlyBonusMap.set(bonus.employee.id, Number(bonus.amount));
     }
 
     return monthlyBonusMap;
@@ -396,6 +414,7 @@ export class EmployeeService {
         year,
       },
       relations: { employee: true },
+      withDeleted: true,
     });
   }
 
@@ -418,7 +437,7 @@ export class EmployeeService {
     writeHistory: boolean;
     year: number;
   }) {
-    if (Math.abs(amount - previousAmount) < 1) {
+    if (existingBonus && Math.abs(amount - previousAmount) < 1) {
       return;
     }
 
@@ -427,6 +446,7 @@ export class EmployeeService {
       amount: String(amount),
       changedByLoginCode: actor?.loginCode ?? null,
       changedByUserId: actor?.id ?? null,
+      deletedAt: null,
     });
     await this.monthlyBonusRepository.save(bonus);
 

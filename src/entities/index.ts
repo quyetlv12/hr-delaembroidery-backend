@@ -1,6 +1,8 @@
 export { Allowance } from "./Allowance";
 export { AttendanceLog } from "./AttendanceLog";
 export { AttendanceMonthSetting } from "./AttendanceMonthSetting";
+export { AttendanceServerSetting } from "./AttendanceServerSetting";
+export { AttendanceServerStaff } from "./AttendanceServerStaff";
 export { AttendanceSetting } from "./AttendanceSetting";
 export { AttendanceSummary } from "./AttendanceSummary";
 export { AuditLog } from "./AuditLog";

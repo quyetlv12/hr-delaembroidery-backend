@@ -1,7 +1,7 @@
 import { MoreThan } from "typeorm";
 
 import { AppDataSource } from "../../database/data-source";
-import { AttendanceSummary, Employee, SalaryRecord } from "../../entities";
+import { AttendanceSetting, AttendanceSummary, Employee, SalaryRecord } from "../../entities";
 
 export type DashboardFilter = {
   employeeId?: string;
@@ -12,11 +12,13 @@ export type DashboardFilter = {
 export class DashboardService {
   private readonly employeeRepository = AppDataSource.getRepository(Employee);
   private readonly attendanceRepository = AppDataSource.getRepository(AttendanceSummary);
+  private readonly attendanceSettingRepository = AppDataSource.getRepository(AttendanceSetting);
   private readonly salaryRepository = AppDataSource.getRepository(SalaryRecord);
 
   async getSummary(filter: DashboardFilter = {}) {
     const range = resolveRange(filter);
-    const today = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const today = toDateString(now);
 
     const [
       totalEmployees,
@@ -28,6 +30,7 @@ export class DashboardService {
       attendanceByDay,
       employeesByDepartment,
       employeeGrowth,
+      todayShiftAbsences,
     ] = await Promise.all([
       this.countEmployees(filter),
       this.countActiveEmployees(filter),
@@ -38,6 +41,7 @@ export class DashboardService {
       this.getAttendanceByDay(filter, range),
       this.getEmployeesByDepartment(filter),
       this.getEmployeeGrowth(filter, range),
+      this.getTodayShiftAbsences(filter, today, now),
     ]);
 
     return {
@@ -50,6 +54,7 @@ export class DashboardService {
       attendanceByDay,
       employeesByDepartment,
       employeeGrowth,
+      todayShiftAbsences,
     };
   }
 
@@ -211,6 +216,98 @@ export class DashboardService {
       };
     });
   }
+
+  private async getTodayShiftAbsences(filter: DashboardFilter, today: string, now: Date) {
+    const settings = await this.getAttendanceSettings();
+    const currentShift = resolveCurrentShift(settings, now);
+
+    if (!currentShift) {
+      return {
+        date: today,
+        shiftKey: "none",
+        shiftLabel: "Ngoài giờ ca",
+        startTime: null,
+        endTime: null,
+        total: 0,
+        rows: [],
+      };
+    }
+
+    const employeesQuery = this.employeeRepository
+      .createQueryBuilder("employee")
+      .leftJoinAndSelect("employee.department", "department")
+      .leftJoinAndSelect("employee.position", "position")
+      .where("employee.status IN (:...statuses)", { statuses: ["active", "probation"] })
+      .andWhere("employee.shiftCount >= :shiftCount", { shiftCount: currentShift.minShiftCount })
+      .orderBy("employee.employeeCode", "ASC");
+
+    if (filter.employeeId) {
+      employeesQuery.andWhere("employee.id = :employeeId", { employeeId: filter.employeeId });
+    }
+
+    const employees = await employeesQuery.getMany();
+    const employeeIds = employees.map((employee) => employee.id);
+    if (employeeIds.length === 0) {
+      return {
+        date: today,
+        shiftKey: currentShift.key,
+        shiftLabel: currentShift.label,
+        startTime: currentShift.startTime,
+        endTime: currentShift.endTime,
+        total: 0,
+        rows: [],
+      };
+    }
+
+    const summaries = await this.attendanceRepository
+      .createQueryBuilder("attendance")
+      .leftJoinAndSelect("attendance.employee", "employee")
+      .where("attendance.workDate = :today", { today })
+      .andWhere("employee.id IN (:...employeeIds)", { employeeIds })
+      .getMany();
+    const checkedEmployeeIds = new Set(
+      summaries
+        .filter((summary) => Boolean(summary[currentShift.checkInProperty]))
+        .map((summary) => summary.employee.id),
+    );
+    const rows = employees
+      .filter((employee) => !checkedEmployeeIds.has(employee.id))
+      .map((employee) => ({
+        employeeId: employee.id,
+        employeeCode: employee.employeeCode,
+        fullName: employee.fullName,
+        avatarUrl: employee.avatarUrl ?? null,
+        departmentName: employee.department?.name ?? "Chưa phân bộ phận",
+        positionName: employee.position?.name ?? "Chưa có chức vụ",
+        shiftCount: employee.shiftCount,
+      }));
+
+    return {
+      date: today,
+      shiftKey: currentShift.key,
+      shiftLabel: currentShift.label,
+      startTime: currentShift.startTime,
+      endTime: currentShift.endTime,
+      total: rows.length,
+      rows,
+    };
+  }
+
+  private async getAttendanceSettings() {
+    const settings = await this.attendanceSettingRepository.findOne({
+      where: {},
+      order: { createdAt: "ASC" },
+    });
+
+    return {
+      morningStart: settings?.morningStart ?? "07:30",
+      morningEnd: settings?.morningEnd ?? "11:30",
+      afternoonStart: settings?.afternoonStart ?? "13:30",
+      afternoonEnd: settings?.afternoonEnd ?? "17:30",
+      nightStart: settings?.nightStart ?? "18:00",
+      nightEnd: settings?.nightEnd ?? "21:00",
+    };
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -244,4 +341,102 @@ function formatDayLabel(value: string) {
   const dateStr = value.slice(0, 10);
   const [, month, day] = dateStr.split("-");
   return `${day}/${month}`;
+}
+
+type AttendanceSettingsForShift = {
+  morningStart: string;
+  morningEnd: string;
+  afternoonStart: string;
+  afternoonEnd: string;
+  nightStart: string;
+  nightEnd: string;
+};
+
+type CurrentShift = {
+  key: "morning" | "afternoon" | "night";
+  label: string;
+  startTime: string;
+  endTime: string;
+  minShiftCount: number;
+  checkInProperty: "morningCheckInAt" | "afternoonCheckInAt" | "nightCheckInAt";
+};
+
+function resolveCurrentShift(settings: AttendanceSettingsForShift, now: Date): CurrentShift | null {
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const morningStart = timeToMinutes(settings.morningStart);
+  const morningEnd = timeToMinutes(settings.morningEnd);
+  const afternoonStart = timeToMinutes(settings.afternoonStart);
+  const afternoonEnd = timeToMinutes(settings.afternoonEnd);
+  const nightStart = timeToMinutes(settings.nightStart);
+  const nightEnd = timeToMinutes(settings.nightEnd);
+
+  if (currentMinutes >= morningStart && currentMinutes < afternoonStart) {
+    return {
+      key: "morning",
+      label: "Ca sáng",
+      startTime: settings.morningStart,
+      endTime: settings.morningEnd,
+      minShiftCount: 1,
+      checkInProperty: "morningCheckInAt",
+    };
+  }
+
+  if (currentMinutes >= afternoonStart && currentMinutes < nightStart) {
+    return {
+      key: "afternoon",
+      label: "Ca chiều",
+      startTime: settings.afternoonStart,
+      endTime: settings.afternoonEnd,
+      minShiftCount: 2,
+      checkInProperty: "afternoonCheckInAt",
+    };
+  }
+
+  if (isWithinTimeRange(currentMinutes, nightStart, nightEnd)) {
+    return {
+      key: "night",
+      label: "Ca 3",
+      startTime: settings.nightStart,
+      endTime: settings.nightEnd,
+      minShiftCount: 3,
+      checkInProperty: "nightCheckInAt",
+    };
+  }
+
+  if (currentMinutes >= morningEnd && currentMinutes < afternoonStart) {
+    return {
+      key: "morning",
+      label: "Ca sáng",
+      startTime: settings.morningStart,
+      endTime: settings.morningEnd,
+      minShiftCount: 1,
+      checkInProperty: "morningCheckInAt",
+    };
+  }
+
+  if (currentMinutes >= afternoonEnd && currentMinutes < nightStart) {
+    return {
+      key: "afternoon",
+      label: "Ca chiều",
+      startTime: settings.afternoonStart,
+      endTime: settings.afternoonEnd,
+      minShiftCount: 2,
+      checkInProperty: "afternoonCheckInAt",
+    };
+  }
+
+  return null;
+}
+
+function isWithinTimeRange(currentMinutes: number, startMinutes: number, endMinutes: number) {
+  if (startMinutes <= endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
+  }
+
+  return currentMinutes >= startMinutes || currentMinutes <= endMinutes;
+}
+
+function timeToMinutes(value: string) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
 }

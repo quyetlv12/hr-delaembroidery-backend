@@ -61,6 +61,16 @@ export async function updateEmployeeSalaryController(req: Request, res: Response
   return ok(res, employee, "Đã cập nhật lương nhân viên");
 }
 
+export async function updateEmployeeTimekeepingCodeController(req: Request, res: Response) {
+  const id = req.params.id;
+  if (typeof id !== "string") {
+    throw new HttpError(400, "INVALID_EMPLOYEE_ID", "ID nhân viên không hợp lệ");
+  }
+
+  const employee = await employeeService.updateTimekeepingCode(id, req.body);
+  return ok(res, employee, "Đã cập nhật ID máy chấm công");
+}
+
 export async function updateEmployeeMonthlyBonusController(req: Request, res: Response) {
   const id = req.params.id;
   if (typeof id !== "string") {
