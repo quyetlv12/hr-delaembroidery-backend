@@ -184,6 +184,12 @@ type YunattAdminBodyRow = Record<string, unknown> & {
   staffNumber?: unknown;
 };
 
+type EmployeeLookupMap = {
+  byCode: Map<string, Employee>;
+  byTimekeepingCode: Map<string, Employee>;
+  byName: Map<string, Employee>;
+};
+
 const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettingsDto = {
   morningStart: "07:30",
   morningEnd: "11:30",
@@ -403,7 +409,7 @@ export class AttendanceService {
     for (const rawRow of rows) {
       const staffNumber = stringCell(rawRow.staffNumber);
       const staffName = stringCell(rawRow.staffName);
-      const matchedEmployee = staffNumber ? employeeMap.byCode.get(normalizeKey(staffNumber)) : undefined;
+      const matchedEmployee = findEmployeeByAttendanceCode(employeeMap, staffNumber);
       const shiftCount = matchedEmployee?.shiftCount ?? 2;
       const days = buildPreviewDaysFromYunattRow(rawRow, year, month, shiftCount, schedule);
 
@@ -574,7 +580,7 @@ export class AttendanceService {
         continue;
       }
 
-      let employee = employeeMap.byCode.get(normalizeKey(rawCode));
+      let employee = findEmployeeByAttendanceCode(employeeMap, rawCode);
       if (!employee && options.autoCreateMissingEmployees !== false && rawCode && rawName) {
         employee = await this.createImportedEmployee(rawCode, rawName, importYear, importMonth);
         employees.push(employee);
@@ -897,7 +903,7 @@ export class AttendanceService {
         continue;
       }
 
-      const matchedEmployee = employeeMap.byCode.get(normalizeKey(rawCode));
+      const matchedEmployee = findEmployeeByAttendanceCode(employeeMap, rawCode);
       const shiftCount = matchedEmployee?.shiftCount ?? 2;
       const days = dateColumns
         .map((column) => {
@@ -962,12 +968,12 @@ export class AttendanceService {
 
   private async buildPayrollPreview(
     previewRows: AttendancePreviewRow[],
-    employeeMap: ReturnType<typeof createEmployeeMap>,
+    employeeMap: EmployeeLookupMap,
     monthSetting: PayrollMonthSetting,
   ): Promise<AttendancePayrollPreview> {
     const standardWorkDay = monthSetting.standardWorkDay;
     const records = previewRows.map((row) => {
-      const employee = employeeMap.byCode.get(normalizeKey(row.employeeCode));
+      const employee = findEmployeeByAttendanceCode(employeeMap, row.employeeCode);
       const configuredSalary = Number(employee?.baseSalary ?? 0);
       const workDay = sum(row.days.map((day) => Number(day.workDay)));
 
@@ -1014,7 +1020,7 @@ export class AttendanceService {
         continue;
       }
 
-      let employee = employeeMap.byCode.get(normalizeKey(row.employeeCode));
+      let employee = findEmployeeByAttendanceCode(employeeMap, row.employeeCode);
       if (!employee && input.autoCreateMissingEmployees !== false && row.employeeCode && row.employeeName) {
         employee = await this.createImportedEmployee(row.employeeCode, row.employeeName, input.year, input.month);
         employees.push(employee);
@@ -1922,9 +1928,10 @@ function formatMinutes(minutes: number) {
   return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
-function createEmployeeMap(employees: Employee[]) {
-  const map = {
+function createEmployeeMap(employees: Employee[]): EmployeeLookupMap {
+  const map: EmployeeLookupMap = {
     byCode: new Map<string, Employee>(),
+    byTimekeepingCode: new Map<string, Employee>(),
     byName: new Map<string, Employee>(),
   };
   for (const employee of employees) {
@@ -1934,10 +1941,7 @@ function createEmployeeMap(employees: Employee[]) {
 }
 
 function addEmployeeToMap(
-  map: {
-    byCode: Map<string, Employee>;
-    byName: Map<string, Employee>;
-  },
+  map: EmployeeLookupMap,
   employee: Employee,
 ) {
   map.byCode.set(normalizeKey(employee.employeeCode), employee);
@@ -1947,13 +1951,22 @@ function addEmployeeToMap(
   }
 
   if (employee.timekeepingCode) {
-    map.byCode.set(normalizeKey(employee.timekeepingCode), employee);
+    map.byTimekeepingCode.set(normalizeKey(employee.timekeepingCode), employee);
     const loginStyleTimekeepingCode = toLoginStyleEmployeeCode(employee.timekeepingCode);
     if (loginStyleTimekeepingCode) {
-      map.byCode.set(normalizeKey(loginStyleTimekeepingCode), employee);
+      map.byTimekeepingCode.set(normalizeKey(loginStyleTimekeepingCode), employee);
     }
   }
   map.byName.set(normalizeKey(employee.fullName), employee);
+}
+
+function findEmployeeByAttendanceCode(map: EmployeeLookupMap, rawCode: string) {
+  const code = normalizeKey(rawCode);
+  if (!code) {
+    return undefined;
+  }
+
+  return map.byTimekeepingCode.get(code) ?? map.byCode.get(code);
 }
 
 function toLoginStyleEmployeeCode(value: string) {
