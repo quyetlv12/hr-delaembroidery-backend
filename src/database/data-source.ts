@@ -1,11 +1,9 @@
 import "reflect-metadata";
 import { DataSource } from "typeorm";
 
+import { APP_TIME_ZONE, MYSQL_TIME_ZONE } from "../common/vietnam-time";
 import { env } from "../config/env";
 import * as entities from "../entities";
-
-export const APP_TIME_ZONE = "Asia/Ho_Chi_Minh";
-export const MYSQL_TIME_ZONE = "+07:00";
 
 process.env.TZ = APP_TIME_ZONE;
 

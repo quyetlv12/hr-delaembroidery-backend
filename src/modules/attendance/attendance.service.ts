@@ -2,6 +2,13 @@ import * as XLSX from "xlsx";
 import { Between, In } from "typeorm";
 
 import { HttpError } from "../../common/http-error";
+import {
+  getDaysInVietnamMonth,
+  getVietnamDateParts,
+  getVietnamDayOfWeek,
+  isValidVietnamDateOnly,
+  VIETNAM_TIMEZONE_OFFSET_MS,
+} from "../../common/vietnam-time";
 import { AppDataSource } from "../../database/data-source";
 import {
   AttendanceLog,
@@ -213,8 +220,6 @@ const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettingsDto = {
   weeklyDaysOff: DEFAULT_WEEKLY_DAYS_OFF,
 };
 
-const VIETNAM_TIMEZONE_OFFSET_MINUTES = 7 * 60;
-const VIETNAM_TIMEZONE_OFFSET_MS = VIETNAM_TIMEZONE_OFFSET_MINUTES * 60 * 1000;
 export class AttendanceService {
   private readonly employeeRepository = AppDataSource.getRepository(Employee);
   private readonly holidayRepository = AppDataSource.getRepository(Holiday);
@@ -579,7 +584,7 @@ export class AttendanceService {
     if (importedMonths.length !== 1) {
       throw new HttpError(422, "INVALID_ATTENDANCE_FILE", "Mỗi lần nhập chấm công chỉ được chứa một tháng");
     }
-    const importMonth = importedMonths[0] ?? new Date().getMonth() + 1;
+    const importMonth = importedMonths[0] ?? getVietnamDateParts().month;
     const employees = await this.employeeRepository.find({ relations: { department: true, position: true } });
     const employeeMap = createEmployeeMap(employees);
     const schedule = await this.getShiftSchedule();
@@ -1008,7 +1013,7 @@ export class AttendanceService {
       throw new HttpError(422, "INVALID_ATTENDANCE_FILE", "Mỗi lần nhập chấm công chỉ được chứa một tháng");
     }
 
-    const month = importMonthInput ?? importedMonths[0] ?? new Date().getMonth() + 1;
+    const month = importMonthInput ?? importedMonths[0] ?? getVietnamDateParts().month;
     const workCalendar = await this.getWorkCalendar(month, importYear);
     const employees = await this.employeeRepository.find({ relations: { department: true, position: true } });
     const employeeMap = createEmployeeMap(employees);
@@ -2212,7 +2217,7 @@ function normalizeImportMonth(value?: number) {
 }
 
 function normalizeImportYear(value?: number) {
-  const year = value ?? new Date().getFullYear();
+  const year = value ?? getVietnamDateParts().year;
   if (!Number.isInteger(year) || year < 2000) {
     throw new HttpError(400, "INVALID_ATTENDANCE_PERIOD", "Năm chấm công không hợp lệ");
   }
@@ -2344,16 +2349,7 @@ function normalizeHolidaySettings(year: number, dto: AttendanceHolidaySettingsDt
 }
 
 function isValidDateOnly(value: string) {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) {
-    return false;
-  }
-
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const date = new Date(year, month - 1, day);
-  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+  return isValidVietnamDateOnly(value);
 }
 
 function formatDisplayDate(value: string) {
@@ -2395,18 +2391,16 @@ function isNonWorkingDate(value: string, calendar: WorkCalendar) {
 }
 
 function getDayOfWeek(value: string) {
-  const [year, month, day] = value.split("-").map(Number);
-  return new Date(year, month - 1, day).getDay();
+  return getVietnamDayOfWeek(value);
 }
 
 function countStandardWorkDays(month: number, year: number, weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF) {
-  const daysInMonth = new Date(year, month, 0).getDate();
+  const daysInMonth = getDaysInVietnamMonth(month, year);
   let workDays = 0;
   const daysOff = new Set(normalizeWeeklyDaysOff(weeklyDaysOff));
 
   for (let day = 1; day <= daysInMonth; day += 1) {
-    const date = new Date(year, month - 1, day);
-    if (!daysOff.has(date.getDay())) {
+    if (!daysOff.has(getVietnamDayOfWeek(formatDate(year, month, day)))) {
       workDays += 1;
     }
   }
