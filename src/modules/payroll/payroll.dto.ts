@@ -9,12 +9,14 @@ export const payrollFormulaColumnKeys = [
   "dailyTotal",
   "earnedSalary",
   "overtimeTotal",
+  "bonusTotal",
   "grossSalary",
   "employerInsuranceTotal",
   "insuranceTotal",
   "taxTotal",
   "advanceTotal",
   "deductionTotal",
+  "bonus",
   "netSalary",
 ] as const;
 

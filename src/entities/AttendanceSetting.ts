@@ -24,4 +24,10 @@ export class AttendanceSetting extends AppBaseEntity {
 
   @Column({ name: "overtime_rate", type: "decimal", precision: 5, scale: 2, default: 1.5 })
   overtimeRate!: string;
+
+  @Column({ name: "holiday_rate", type: "decimal", precision: 5, scale: 2, default: 2 })
+  holidayRate!: string;
+
+  @Column({ name: "weekly_days_off", type: "varchar", length: 30, default: "0" })
+  weeklyDaysOff!: string;
 }

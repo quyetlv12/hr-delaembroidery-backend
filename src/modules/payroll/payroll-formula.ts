@@ -40,13 +40,19 @@ export const DEFAULT_PAYROLL_COLUMN_FORMULAS: PayrollColumnFormulaInput[] = [
   { key: "dailyTotal", name: "Tổng lương ngày", formula: "luongCoDinh + trachNhiem + anCa + dienThoai + kpi" },
   { key: "earnedSalary", name: "Lương trong tháng", formula: "tongLuongNgay * ngayCong" },
   { key: "overtimeTotal", name: "Lương tăng ca", formula: "soGioTangCa * luongNgayThucHuong / 8 * heSoOT" },
-  { key: "grossSalary", name: "Tổng lương", formula: "luongThang + luongTangCa" },
+  {
+    key: "bonusTotal",
+    name: "Thưởng lễ",
+    formula: "luongNgayThucHuong * ngayCongLe * heSoLe + tienLeCoDinh",
+  },
+  { key: "grossSalary", name: "Tổng lương", formula: "luongThang + luongTangCa + thuongLe" },
   { key: "employerInsuranceTotal", name: "BHXH công ty", formula: "luongBHXH * tyLeBHXHCongTy / 100" },
   { key: "insuranceTotal", name: "BHXH NLĐ", formula: "luongBHXH * tyLeBHXHNLD / 100" },
   { key: "taxTotal", name: "Thuế TNCN", formula: "khauTruThue" },
   { key: "advanceTotal", name: "Tạm ứng", formula: "tamUng" },
   { key: "deductionTotal", name: "Tổng giảm trừ", formula: "bhxhNhanVien + thueTNCN + tamUng" },
-  { key: "netSalary", name: "Thực nhận", formula: "tongLuong - tongGiamTru" },
+  { key: "bonus", name: "Thưởng", formula: "thuong" },
+  { key: "netSalary", name: "Thực nhận", formula: "tongLuong - tongGiamTru + thuong" },
 ];
 
 export const DEFAULT_PAYROLL_FORMULA_SETTING: PayrollFormulaSettingDto = {
@@ -64,12 +70,15 @@ type PayrollFormulaInput = {
   standardWorkDay: number;
   overtimeMinutes: number;
   overtimeRate: number;
-  holidayBonusTotal?: number;
+  holidayWorkDay?: number;
+  holidayRate?: number;
+  holidayFixedBonusTotal?: number;
   insuranceSalary?: number;
   employeeInsuranceRate?: number;
   employerInsuranceRate?: number;
   defaultMealAllowance?: number;
   defaultPhoneAllowance?: number;
+  monthlyBonus?: number;
   formulas?: {
     columnFormulas?: PayrollColumnFormulaInput[];
   };
@@ -109,6 +118,7 @@ export type PayrollFormulaResult = {
   personalIncomeTax: number;
   advanceTotal: number;
   totalDeduction: number;
+  bonus: number;
   netSalary: number;
   formulaDetails: PayrollColumnFormulaResult[];
 };
@@ -124,7 +134,10 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
   const employerInsurancePercent = normalizePercentValue(input.employerInsuranceRate, EMPLOYER_INSURANCE_RATE);
   const defaultMealAllowance = sanitizeMoney(input.defaultMealAllowance ?? DEFAULT_MEAL_ALLOWANCE);
   const defaultPhoneAllowance = sanitizeMoney(input.defaultPhoneAllowance ?? DEFAULT_PHONE_ALLOWANCE);
-  const bonusTotal = roundCurrency(input.holidayBonusTotal ?? 0);
+  const monthlyBonus = roundCurrency(input.monthlyBonus ?? 0);
+  const holidayWorkDay = roundNumber(input.holidayWorkDay ?? 0);
+  const holidayRate = Number.isFinite(Number(input.holidayRate)) ? Math.max(0, Number(input.holidayRate)) : 2;
+  const holidayFixedBonusTotal = roundCurrency(input.holidayFixedBonusTotal ?? 0);
   const allowances = splitAllowances(input.allowances ?? []);
   const mealAllowanceSource = allowances.meal > 0 ? allowances.meal : defaultMealAllowance * workDay;
   const phoneAllowanceSource = allowances.phone > 0 ? allowances.phone : defaultPhoneAllowance * workDay;
@@ -133,6 +146,7 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
 
   const dailyActualSalary = standardWorkDay > 0 ? actualSalary / standardWorkDay : 0;
   const fixedDailySalaryFallback = standardWorkDay > 0 ? insuranceSalary / standardWorkDay : 0;
+  const defaultHolidayBonusTotal = roundCurrency(dailyActualSalary * holidayWorkDay * holidayRate + holidayFixedBonusTotal);
   const payrollVariables = {
     thucHuong: actualSalary,
     luongBHXH: insuranceSalary,
@@ -148,13 +162,24 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
     phuCapKpi: allowances.kpi,
     phuCapKhac: allowances.other,
     phuCap: effectiveAllowanceTotal,
-    thuongLe: bonusTotal,
+    thuongLe: defaultHolidayBonusTotal,
+    tienLe: defaultHolidayBonusTotal,
+    luongLe: defaultHolidayBonusTotal,
+    tienLeCoDinh: holidayFixedBonusTotal,
+    thuongLeCoDinh: holidayFixedBonusTotal,
+    soNgayLe: holidayWorkDay,
+    ngayCongLe: holidayWorkDay,
+    heSoLe: holidayRate,
     soGioTangCa: input.overtimeMinutes / 60,
     heSoOT: input.overtimeRate,
     tyLeBHXHNLD: employeeInsurancePercent,
     tyLeBHXHCongTy: employerInsurancePercent,
     khauTruThue: deductions.tax,
     tamUng: deductions.advance,
+    thuong: monthlyBonus,
+    tienThuong: monthlyBonus,
+    thuongThang: monthlyBonus,
+    bonus: monthlyBonus,
   };
   const formulaVariables: Record<string, number> = { ...payrollVariables };
   const columnFormulaMap = createColumnFormulaMap(input.formulas?.columnFormulas);
@@ -183,6 +208,7 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
   const hourlyRate = dailyActualSalary / HOURS_PER_WORK_DAY;
   const earnedSalary = evaluateColumn("earnedSalary", dailyTotal * workDay);
   const overtimeSalary = evaluateColumn("overtimeTotal", (input.overtimeMinutes / 60) * hourlyRate * input.overtimeRate);
+  const bonusTotal = evaluateColumn("bonusTotal", defaultHolidayBonusTotal);
   const grossSalary = evaluateColumn("grossSalary", earnedSalary + overtimeSalary);
 
   const employerSocialInsurance = roundCurrency(insuranceSalary * EMPLOYER_SOCIAL_INSURANCE_RATE);
@@ -199,7 +225,8 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
   const employeeInsuranceDeduction = employeeInsuranceTotal;
   const totalInsurance = roundCurrency(employerInsuranceTotal + employeeInsuranceTotal);
   const totalDeduction = evaluateColumn("deductionTotal", employeeInsuranceTotal + personalIncomeTax + advanceTotal);
-  const netSalary = evaluateColumn("netSalary", grossSalary - totalDeduction);
+  const bonus = evaluateColumn("bonus", monthlyBonus);
+  const netSalary = evaluateColumn("netSalary", grossSalary - totalDeduction + bonus);
 
   return {
     actualSalary,
@@ -233,6 +260,7 @@ export function calculateExcelPayroll(input: PayrollFormulaInput): PayrollFormul
     personalIncomeTax,
     advanceTotal,
     totalDeduction,
+    bonus,
     netSalary,
     formulaDetails,
   };
@@ -360,12 +388,14 @@ function assignColumnFormulaAliases(
     dailyTotal: ["luongNgay", "tongLuongNgay"],
     earnedSalary: ["luongCong", "luongThang", "luongTrongThang"],
     overtimeTotal: ["luongTangCa"],
+    bonusTotal: ["thuongLe", "tienLe", "luongLe"],
     grossSalary: ["tongLuong"],
     employerInsuranceTotal: ["bhxhCongTy"],
     insuranceTotal: ["bhxhNhanVien"],
     taxTotal: ["thueTNCN"],
     advanceTotal: ["tamUng"],
     deductionTotal: ["tongGiamTru"],
+    bonus: ["thuong", "tienThuong", "thuongThang"],
     netSalary: ["thucNhan"],
   };
 

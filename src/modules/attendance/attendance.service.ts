@@ -190,6 +190,17 @@ type EmployeeLookupMap = {
   byName: Map<string, Employee>;
 };
 
+type WorkCalendar = {
+  weeklyDaysOff: Set<number>;
+  holidayDates: Set<string>;
+};
+
+type ParseAttendanceOptions = {
+  isNonWorkingDay?: boolean;
+};
+
+const DEFAULT_WEEKLY_DAYS_OFF = [0];
+
 const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettingsDto = {
   morningStart: "07:30",
   morningEnd: "11:30",
@@ -198,6 +209,8 @@ const DEFAULT_ATTENDANCE_SETTINGS: AttendanceSettingsDto = {
   nightStart: "18:00",
   nightEnd: "21:00",
   overtimeRate: 1.5,
+  holidayRate: 2,
+  weeklyDaysOff: DEFAULT_WEEKLY_DAYS_OFF,
 };
 
 const VIETNAM_TIMEZONE_OFFSET_MINUTES = 7 * 60;
@@ -229,9 +242,12 @@ export class AttendanceService {
       nightStart: dto.nightStart,
       nightEnd: dto.nightEnd,
       overtimeRate: String(dto.overtimeRate),
+      holidayRate: String(dto.holidayRate),
+      weeklyDaysOff: formatWeeklyDaysOff(dto.weeklyDaysOff),
     });
 
     const savedSettings = await this.settingRepository.save(settings);
+    await this.recalculateExistingAttendancePeriods();
     return this.toSettingsDto(savedSettings);
   }
 
@@ -246,9 +262,12 @@ export class AttendanceService {
     });
     const settingByMonth = new Map(settings.map((setting) => [setting.month, setting]));
 
+    const weeklyDaysOff = await this.getWeeklyDaysOff();
     return {
       year,
-      rows: Array.from({ length: 12 }, (_, index) => this.toMonthSettingDto(settingByMonth.get(index + 1), index + 1, year)),
+      rows: Array.from({ length: 12 }, (_, index) =>
+        this.toMonthSettingDto(settingByMonth.get(index + 1), index + 1, year, weeklyDaysOff),
+      ),
     };
   }
 
@@ -306,23 +325,24 @@ export class AttendanceService {
         holidays.map((holiday) =>
           holidayRepository.create({
             holidayDate: holiday.date,
-            name: `Ngày lễ ${formatDisplayDate(holiday.date)}`,
-            isPaid: true,
+            name: holiday.name || `Ngày lễ ${formatDisplayDate(holiday.date)}`,
+            isPaid: holiday.isPaid,
             bonusAmount: String(holiday.amount),
           }),
         ),
       );
     });
 
-    for (let month = 1; month <= 12; month += 1) {
-      await this.payrollService.recalculatePeriodIfUnlocked(month, dto.year);
-    }
+    await this.recalculateAttendancePeriods(
+      Array.from({ length: 12 }, (_, index) => `${dto.year}-${String(index + 1).padStart(2, "0")}`),
+    );
 
     return this.listHolidaySettings(dto.year);
   }
 
   async list(month: number, year: number, employeeId?: string) {
     const schedule = await this.getShiftSchedule();
+    const workCalendar = await this.getWorkCalendar(month, year);
     const dateRange = getMonthRange(month, year);
     const where = employeeId
       ? { workDate: Between(dateRange.from, dateRange.to), employee: { id: employeeId } }
@@ -345,7 +365,7 @@ export class AttendanceService {
 
     const rows = summaries.map((summary) => {
       const log = logsBySummaryKey.get(getAttendanceKey(summary.employee.id, summary.workDate));
-      const parsedFallback = this.parseLogShiftTimes(summary, log, schedule);
+      const parsedFallback = this.parseLogShiftTimes(summary, log, schedule, workCalendar);
       return this.toSummaryDto(summary, parsedFallback);
     });
     const visibleColumns = employeeId
@@ -404,6 +424,7 @@ export class AttendanceService {
     }
     const year = normalizeImportYear(input.year);
     const schedule = await this.getShiftSchedule();
+    const workCalendar = await this.getWorkCalendar(month, year);
     const rows = parseYunattAdminBodyRows(input.body);
     const employees = await this.employeeRepository.find({ relations: { department: true, position: true } });
     const employeeMap = createEmployeeMap(employees);
@@ -414,7 +435,7 @@ export class AttendanceService {
       const staffName = stringCell(rawRow.staffName);
       const matchedEmployee = findEmployeeByAttendanceCode(employeeMap, staffNumber);
       const shiftCount = matchedEmployee?.shiftCount ?? 2;
-      const days = buildPreviewDaysFromYunattRow(rawRow, year, month, shiftCount, schedule);
+      const days = buildPreviewDaysFromYunattRow(rawRow, year, month, shiftCount, schedule, workCalendar);
 
       if (days.length === 0) {
         continue;
@@ -513,6 +534,7 @@ export class AttendanceService {
       rowsWithoutId.map((row) => [`${row.employeeId}:${row.workDate}`, row] as const),
     );
     const schedule = await this.getShiftSchedule();
+    const workCalendar = await this.getWorkCalendar(month, year);
     const updatedSummaries = summaries.map((summary) => {
       const rowInput =
         rowInputMap.get(summary.id) ?? rowInputByEmployeeDate.get(`${summary.employee.id}:${summary.workDate}`);
@@ -520,7 +542,7 @@ export class AttendanceService {
         return summary;
       }
 
-      this.mergeManualAttendance(summary, rowInput, schedule);
+      this.mergeManualAttendance(summary, rowInput, schedule, workCalendar);
       return summary;
     });
 
@@ -531,6 +553,7 @@ export class AttendanceService {
           summary,
           rowInputMap.get(summary.id) ?? rowInputByEmployeeDate.get(`${summary.employee.id}:${summary.workDate}`),
           schedule,
+          workCalendar,
         ),
       ),
     );
@@ -560,6 +583,7 @@ export class AttendanceService {
     const employees = await this.employeeRepository.find({ relations: { department: true, position: true } });
     const employeeMap = createEmployeeMap(employees);
     const schedule = await this.getShiftSchedule();
+    const workCalendar = await this.getWorkCalendar(importMonth, importYear);
     const summaryRows: AttendanceSummary[] = [];
     const logRows: AttendanceLog[] = [];
     const unmatchedRows: Array<{ code: string; name: string }> = [];
@@ -604,6 +628,7 @@ export class AttendanceService {
           column.day,
           employee.shiftCount,
           schedule,
+          { isNonWorkingDay: isNonWorkingDate(formatDate(importYear, column.month, column.day), workCalendar) },
         );
         if (!parsedCell.hasData) {
           continue;
@@ -719,6 +744,71 @@ export class AttendanceService {
     return toShiftSchedule(settings);
   }
 
+  private async getWeeklyDaysOff() {
+    const settings = await this.findSettings();
+    return normalizeWeeklyDaysOff(settings?.weeklyDaysOff);
+  }
+
+  private async getWorkCalendar(month: number, year: number): Promise<WorkCalendar> {
+    const weeklyDaysOff = await this.getWeeklyDaysOff();
+    const { from, to } = getMonthRange(month, year);
+    const holidays = await this.holidayRepository.find({
+      where: { holidayDate: Between(from, to) },
+    });
+
+    return {
+      weeklyDaysOff: new Set(weeklyDaysOff),
+      holidayDates: new Set(holidays.map((holiday) => holiday.holidayDate)),
+    };
+  }
+
+  private async recalculateExistingAttendancePeriods() {
+    const summaries = await this.summaryRepository.find();
+    const periodKeys = Array.from(new Set(summaries.map((summary) => getPeriodKey(summary.workDate))));
+    await this.recalculateAttendancePeriods(periodKeys);
+  }
+
+  private async recalculateAttendancePeriods(periodKeys: string[]) {
+    const schedule = await this.getShiftSchedule();
+    const uniquePeriodKeys = Array.from(new Set(periodKeys));
+
+    for (const periodKey of uniquePeriodKeys) {
+      const [year, month] = periodKey.split("-").map(Number);
+      if (!Number.isFinite(month) || !Number.isFinite(year)) {
+        continue;
+      }
+
+      const dateRange = getMonthRange(month, year);
+      const [summaries, logs, workCalendar] = await Promise.all([
+        this.summaryRepository.find({
+          where: { workDate: Between(dateRange.from, dateRange.to) },
+          relations: { employee: true },
+        }),
+        this.logRepository.find({
+          where: { workDate: Between(dateRange.from, dateRange.to) },
+          relations: { employee: true },
+        }),
+        this.getWorkCalendar(month, year),
+      ]);
+      const logsBySummaryKey = groupUniqueLogsByAttendanceKey(logs);
+      const changedSummaries = summaries.flatMap((summary) => {
+        const log = logsBySummaryKey.get(getAttendanceKey(summary.employee.id, summary.workDate));
+        const parsedCell = this.parseLogShiftTimes(summary, log, schedule, workCalendar);
+        if (!parsedCell) {
+          return [];
+        }
+
+        applyParsedAttendance(summary, parsedCell);
+        return [summary];
+      });
+
+      if (changedSummaries.length > 0) {
+        await this.summaryRepository.save(changedSummaries);
+      }
+      await this.payrollService.recalculatePeriodIfUnlocked(month, year);
+    }
+  }
+
   private toSettingsDto(settings: AttendanceSetting): AttendanceSettingsDto {
     return {
       morningStart: settings.morningStart,
@@ -728,13 +818,16 @@ export class AttendanceService {
       nightStart: settings.nightStart ?? DEFAULT_ATTENDANCE_SETTINGS.nightStart,
       nightEnd: settings.nightEnd ?? DEFAULT_ATTENDANCE_SETTINGS.nightEnd,
       overtimeRate: Number(settings.overtimeRate ?? DEFAULT_ATTENDANCE_SETTINGS.overtimeRate),
+      holidayRate: Number(settings.holidayRate ?? DEFAULT_ATTENDANCE_SETTINGS.holidayRate),
+      weeklyDaysOff: normalizeWeeklyDaysOff(settings.weeklyDaysOff),
     };
   }
 
   private async getPayrollMonthSetting(month: number, year: number) {
-    const holidayStats = await this.getPaidHolidayStats(month, year);
+    const weeklyDaysOff = await this.getWeeklyDaysOff();
+    const holidayStats = await this.getPaidHolidayStats(month, year, weeklyDaysOff);
     const holidayPaidDays = holidayStats.paidDays;
-    const standardWorkDay = Math.max(0, countStandardWorkDays(month, year) - holidayPaidDays);
+    const standardWorkDay = countStandardWorkDays(month, year, weeklyDaysOff);
 
     return {
       month,
@@ -746,26 +839,31 @@ export class AttendanceService {
     };
   }
 
-  private toMonthSettingDto(settings: AttendanceMonthSetting | undefined, month: number, year: number): PayrollMonthSetting {
+  private toMonthSettingDto(
+    settings: AttendanceMonthSetting | undefined,
+    month: number,
+    year: number,
+    weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF,
+  ): PayrollMonthSetting {
     const holidayPaidDays = Number(settings?.holidayPaidDays ?? 0);
     const holidayBonusAmount = Number(settings?.holidayBonusAmount ?? 0);
 
     return {
       month,
       year,
-      standardWorkDay: Number(settings?.standardWorkDay ?? countStandardWorkDays(month, year)),
+      standardWorkDay: Number(settings?.standardWorkDay ?? countStandardWorkDays(month, year, weeklyDaysOff)),
       holidayPaidDays,
       holidayBonusAmount,
       holidayBonusTotal: roundCurrency(holidayPaidDays * holidayBonusAmount),
     };
   }
 
-  private async getPaidHolidayStats(month: number, year: number) {
+  private async getPaidHolidayStats(month: number, year: number, weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF) {
     const { from, to } = getMonthRange(month, year);
     const holidays = await this.holidayRepository.find({
       where: { holidayDate: Between(from, to), isPaid: true },
     });
-    const paidHolidays = holidays.filter((holiday) => !isSunday(holiday.holidayDate));
+    const paidHolidays = holidays.filter((holiday) => !isWeeklyDayOff(holiday.holidayDate, weeklyDaysOff));
     return {
       paidDays: paidHolidays.length,
       bonusTotal: roundCurrency(sum(paidHolidays.map((holiday) => Number(holiday.bonusAmount ?? 0)))),
@@ -809,7 +907,12 @@ export class AttendanceService {
     };
   }
 
-  private parseLogShiftTimes(summary: AttendanceSummary, log: AttendanceLog | undefined, schedule: ShiftSchedule) {
+  private parseLogShiftTimes(
+    summary: AttendanceSummary,
+    log: AttendanceLog | undefined,
+    schedule: ShiftSchedule,
+    workCalendar: WorkCalendar,
+  ) {
     if (!log?.rawPayload || typeof log.rawPayload !== "object") {
       return undefined;
     }
@@ -824,37 +927,31 @@ export class AttendanceService {
       return undefined;
     }
 
-    return parseAttendanceCell(rawValue, year, month, day, summary.employee.shiftCount, schedule);
+    return parseAttendanceCell(rawValue, year, month, day, summary.employee.shiftCount, schedule, {
+      isNonWorkingDay: isNonWorkingDate(summary.workDate, workCalendar),
+    });
   }
 
   private mergeManualAttendance(
     summary: AttendanceSummary,
     rowInput: UpdateAttendanceSummaryRowDto,
     schedule: ShiftSchedule,
+    workCalendar: WorkCalendar,
   ) {
     const [year, month, day] = summary.workDate.split("-").map(Number);
     const value = buildManualAttendanceValue(rowInput);
-    const parsedCell = parseAttendanceCell(value, year, month, day, summary.employee.shiftCount, schedule);
+    const parsedCell = parseAttendanceCell(value, year, month, day, summary.employee.shiftCount, schedule, {
+      isNonWorkingDay: isNonWorkingDate(summary.workDate, workCalendar),
+    });
 
-    summary.checkInAt = parsedCell.checkInAt;
-    summary.checkOutAt = parsedCell.checkOutAt;
-    summary.morningCheckInAt = parsedCell.morningCheckInAt;
-    summary.morningCheckOutAt = parsedCell.morningCheckOutAt;
-    summary.afternoonCheckInAt = parsedCell.afternoonCheckInAt;
-    summary.afternoonCheckOutAt = parsedCell.afternoonCheckOutAt;
-    summary.nightCheckInAt = parsedCell.nightCheckInAt;
-    summary.nightCheckOutAt = parsedCell.nightCheckOutAt;
-    summary.lateMinutes = parsedCell.lateMinutes;
-    summary.earlyLeaveMinutes = parsedCell.earlyLeaveMinutes;
-    summary.overtimeMinutes = parsedCell.overtimeMinutes;
-    summary.workDay = String(parsedCell.workDay);
-    summary.status = parsedCell.status;
+    applyParsedAttendance(summary, parsedCell);
   }
 
   private async upsertManualAttendanceLog(
     summary: AttendanceSummary,
     rowInput: UpdateAttendanceSummaryRowDto | undefined,
     schedule: ShiftSchedule,
+    workCalendar: WorkCalendar,
   ) {
     if (!rowInput) {
       return;
@@ -862,7 +959,9 @@ export class AttendanceService {
 
     const [year, month, day] = summary.workDate.split("-").map(Number);
     const value = buildManualAttendanceValue(rowInput);
-    const parsedCell = parseAttendanceCell(value, year, month, day, summary.employee.shiftCount, schedule);
+    const parsedCell = parseAttendanceCell(value, year, month, day, summary.employee.shiftCount, schedule, {
+      isNonWorkingDay: isNonWorkingDate(summary.workDate, workCalendar),
+    });
     const existingLog = await this.logRepository.findOne({
       where: {
         employee: { id: summary.employee.id },
@@ -909,6 +1008,8 @@ export class AttendanceService {
       throw new HttpError(422, "INVALID_ATTENDANCE_FILE", "Mỗi lần nhập chấm công chỉ được chứa một tháng");
     }
 
+    const month = importMonthInput ?? importedMonths[0] ?? new Date().getMonth() + 1;
+    const workCalendar = await this.getWorkCalendar(month, importYear);
     const employees = await this.employeeRepository.find({ relations: { department: true, position: true } });
     const employeeMap = createEmployeeMap(employees);
     const previewRows: AttendancePreviewRow[] = [];
@@ -925,9 +1026,12 @@ export class AttendanceService {
       const days = dateColumns
         .map((column) => {
           const value = stringCell(row[column.index]);
-          const parsedCell = parseAttendanceCell(value, importYear, column.month, column.day, shiftCount, schedule);
+          const date = formatDate(importYear, column.month, column.day);
+          const parsedCell = parseAttendanceCell(value, importYear, column.month, column.day, shiftCount, schedule, {
+            isNonWorkingDay: isNonWorkingDate(date, workCalendar),
+          });
           return {
-            date: formatDate(importYear, column.month, column.day),
+            date,
             column: column.label,
             value,
             times: parsedCell.times,
@@ -966,7 +1070,6 @@ export class AttendanceService {
       });
     }
 
-    const month = importMonthInput ?? importedMonths[0] ?? new Date().getMonth() + 1;
     const payrollMonthSetting = await this.getPayrollMonthSetting(month, importYear);
     const payrollPreview = await this.buildPayrollPreview(previewRows, employeeMap, payrollMonthSetting);
 
@@ -992,7 +1095,7 @@ export class AttendanceService {
     const records = previewRows.map((row) => {
       const employee = findEmployeeByAttendanceCode(employeeMap, row.employeeCode);
       const configuredSalary = Number(employee?.baseSalary ?? 0);
-      const workDay = sum(row.days.map((day) => Number(day.workDay)));
+      const workDay = roundNumber(sum(row.days.map((day) => Number(day.workDay))));
 
       return buildAttendancePayPreviewRecord({
         employeeId: employee?.id,
@@ -1025,6 +1128,7 @@ export class AttendanceService {
     const employees = await this.employeeRepository.find();
     const employeeMap = createEmployeeMap(employees);
     const schedule = await this.getShiftSchedule();
+    const workCalendar = await this.getWorkCalendar(input.month, input.year);
     const summaryRows: AttendanceSummary[] = [];
     const logRows: AttendanceLog[] = [];
     const unmatchedRows: Array<{ code: string; name: string }> = [];
@@ -1055,12 +1159,14 @@ export class AttendanceService {
         const year = Number.isFinite(rawYear) ? rawYear : input.year;
         const month = Number.isFinite(rawMonth) ? rawMonth : input.month;
         const dayOfMonth = Number.isFinite(rawDayOfMonth) ? rawDayOfMonth : 1;
-        const parsedCell = parseAttendanceCell(day.value, year, month, dayOfMonth, employee.shiftCount, schedule);
+        const workDate = formatDate(year, month, dayOfMonth);
+        const parsedCell = parseAttendanceCell(day.value, year, month, dayOfMonth, employee.shiftCount, schedule, {
+          isNonWorkingDay: isNonWorkingDate(workDate, workCalendar),
+        });
         if (!parsedCell.hasData) {
           continue;
         }
 
-        const workDate = formatDate(year, month, dayOfMonth);
         summaryRows.push(
           this.summaryRepository.create({
             employee,
@@ -1344,6 +1450,7 @@ function parseAttendanceCell(
   day: number,
   shiftCount = 2,
   schedule = toShiftSchedule(DEFAULT_ATTENDANCE_SETTINGS),
+  options: ParseAttendanceOptions = {},
 ): ParsedAttendanceCell {
   const normalizedValue = normalizeKey(value);
   const isFullDayLeave = normalizedValue.includes("ca ngay") || normalizedValue.includes("full day");
@@ -1386,13 +1493,15 @@ function parseAttendanceCell(
   const overtimeCheckOut = sessions.nightOut !== null ? sessions.nightOut : sessions.afternoonOut;
   const overtimeEnd = sessions.nightOut !== null ? schedule.nightEnd : schedule.afternoonEnd;
   const rawOvertimeMinutes = overtimeCheckOut === null || isFullDayLeave ? 0 : Math.max(0, overtimeCheckOut - overtimeEnd);
-  const metrics = isFullDayLeave
-    ? { lateMinutes: 0, earlyLeaveMinutes: 0, overtimeMinutes: 0, workDay: 1 }
-    : calculateAttendanceMetrics(sessions, shiftCount, schedule, {
-        lateMinutes: rawLateMinutes,
-        earlyLeaveMinutes: rawEarlyLeaveMinutes,
-        overtimeMinutes: rawOvertimeMinutes,
-      });
+  const metrics = options.isNonWorkingDay
+    ? calculateNonWorkingDayMetrics(uniqueTimes, schedule)
+    : isFullDayLeave
+      ? { lateMinutes: 0, earlyLeaveMinutes: 0, overtimeMinutes: 0, workDay: 1 }
+      : calculateAttendanceMetrics(sessions, shiftCount, schedule, {
+          lateMinutes: rawLateMinutes,
+          earlyLeaveMinutes: rawEarlyLeaveMinutes,
+          overtimeMinutes: rawOvertimeMinutes,
+        });
 
   return {
     hasData,
@@ -1446,6 +1555,7 @@ function buildPreviewDaysFromYunattRow(
   month: number,
   shiftCount: number,
   schedule: ShiftSchedule,
+  workCalendar: WorkCalendar,
 ): AttendancePreviewDay[] {
   return Object.entries(row)
     .map(([key, value]) => {
@@ -1462,13 +1572,16 @@ function buildPreviewDaysFromYunattRow(
       }
 
       const cellValue = normalizeYunattDayValue(value);
-      const parsedCell = parseAttendanceCell(cellValue, year, month, rowDay, shiftCount, schedule);
+      const date = formatDate(year, month, rowDay);
+      const parsedCell = parseAttendanceCell(cellValue, year, month, rowDay, shiftCount, schedule, {
+        isNonWorkingDay: isNonWorkingDate(date, workCalendar),
+      });
       if (!parsedCell.hasData) {
         return null;
       }
 
       return {
-        date: formatDate(year, month, rowDay),
+        date,
         column: `${String(month).padStart(2, "0")}-${String(rowDay).padStart(2, "0")}`,
         value: cellValue,
         times: parsedCell.times,
@@ -1665,6 +1778,34 @@ function calculateAttendanceMetrics(
     overtimeMinutes: Math.max(0, workedMinutes - expectedWorkMinutes),
     workDay: Math.min(1, roundNumber(workedMinutes / expectedWorkMinutes)),
   };
+}
+
+function calculateNonWorkingDayMetrics(uniqueTimes: number[], schedule: ShiftSchedule) {
+  return {
+    lateMinutes: 0,
+    earlyLeaveMinutes: 0,
+    overtimeMinutes: getNonWorkingDayWorkedMinutes(uniqueTimes, schedule),
+    workDay: 0,
+  };
+}
+
+function getNonWorkingDayWorkedMinutes(uniqueTimes: number[], schedule: ShiftSchedule) {
+  const first = uniqueTimes[0];
+  const last = uniqueTimes[uniqueTimes.length - 1];
+  if (first === undefined || last === undefined || first === last) {
+    return 0;
+  }
+
+  const lunchBreak =
+    first < schedule.afternoonStart && last > schedule.morningEnd
+      ? Math.max(0, schedule.afternoonStart - schedule.morningEnd)
+      : 0;
+  const dinnerBreak =
+    first < schedule.nightStart && last > schedule.afternoonEnd
+      ? Math.max(0, schedule.nightStart - schedule.afternoonEnd)
+      : 0;
+
+  return Math.max(0, last - first - lunchBreak - dinnerBreak);
 }
 
 function getExpectedTwoDayShiftMinutes(schedule: ShiftSchedule) {
@@ -2181,8 +2322,9 @@ function toHolidayDto(holiday: Holiday) {
 }
 
 function normalizeHolidaySettings(year: number, dto: AttendanceHolidaySettingsDto) {
-  const holidayInputs = dto.holidays ?? dto.dates?.map((date) => ({ date, amount: 0 })) ?? [];
-  const holidaysByDate = new Map<string, { date: string; amount: number }>();
+  const holidayInputs: Array<{ date: string; name?: string; isPaid?: boolean; amount?: number }> =
+    dto.holidays ?? dto.dates?.map((date) => ({ date, isPaid: true, amount: 0 })) ?? [];
+  const holidaysByDate = new Map<string, { date: string; name?: string; isPaid: boolean; amount: number }>();
 
   for (const holiday of holidayInputs) {
     const date = holiday.date.trim();
@@ -2192,6 +2334,8 @@ function normalizeHolidaySettings(year: number, dto: AttendanceHolidaySettingsDt
 
     holidaysByDate.set(date, {
       date,
+      name: holiday.name?.trim() || undefined,
+      isPaid: holiday.isPaid ?? true,
       amount: roundCurrency(holiday.amount ?? 0),
     });
   }
@@ -2217,21 +2361,71 @@ function formatDisplayDate(value: string) {
   return `${day}/${month}`;
 }
 
-function isSunday(value: string) {
-  const [year, month, day] = value.split("-").map(Number);
-  return new Date(year, month - 1, day).getDay() === 0;
+function normalizeWeeklyDaysOff(value: unknown = DEFAULT_WEEKLY_DAYS_OFF) {
+  const rawValues = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",")
+      : value === undefined || value === null
+        ? []
+        : [value];
+  const days = Array.from(
+    new Set(
+      rawValues
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item >= 0 && item <= 6),
+    ),
+  ).sort((left, right) => left - right);
+
+  return days.length > 0 ? days : [...DEFAULT_WEEKLY_DAYS_OFF];
 }
 
-function countStandardWorkDays(month: number, year: number) {
+function formatWeeklyDaysOff(value: number[]) {
+  return normalizeWeeklyDaysOff(value).join(",");
+}
+
+function isWeeklyDayOff(value: string, weeklyDaysOff: Set<number> | number[] = DEFAULT_WEEKLY_DAYS_OFF) {
+  const dayOfWeek = getDayOfWeek(value);
+  const daysOff = Array.isArray(weeklyDaysOff) ? new Set(weeklyDaysOff) : weeklyDaysOff;
+  return daysOff.has(dayOfWeek);
+}
+
+function isNonWorkingDate(value: string, calendar: WorkCalendar) {
+  return calendar.holidayDates.has(value) || isWeeklyDayOff(value, calendar.weeklyDaysOff);
+}
+
+function getDayOfWeek(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day).getDay();
+}
+
+function countStandardWorkDays(month: number, year: number, weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF) {
   const daysInMonth = new Date(year, month, 0).getDate();
   let workDays = 0;
+  const daysOff = new Set(normalizeWeeklyDaysOff(weeklyDaysOff));
 
   for (let day = 1; day <= daysInMonth; day += 1) {
     const date = new Date(year, month - 1, day);
-    if (date.getDay() !== 0) {
+    if (!daysOff.has(date.getDay())) {
       workDays += 1;
     }
   }
 
   return workDays;
+}
+
+function applyParsedAttendance(summary: AttendanceSummary, parsedCell: ParsedAttendanceCell) {
+  summary.checkInAt = parsedCell.checkInAt;
+  summary.checkOutAt = parsedCell.checkOutAt;
+  summary.morningCheckInAt = parsedCell.morningCheckInAt;
+  summary.morningCheckOutAt = parsedCell.morningCheckOutAt;
+  summary.afternoonCheckInAt = parsedCell.afternoonCheckInAt;
+  summary.afternoonCheckOutAt = parsedCell.afternoonCheckOutAt;
+  summary.nightCheckInAt = parsedCell.nightCheckInAt;
+  summary.nightCheckOutAt = parsedCell.nightCheckOutAt;
+  summary.lateMinutes = parsedCell.lateMinutes;
+  summary.earlyLeaveMinutes = parsedCell.earlyLeaveMinutes;
+  summary.overtimeMinutes = parsedCell.overtimeMinutes;
+  summary.workDay = String(parsedCell.workDay);
+  summary.status = parsedCell.status;
 }

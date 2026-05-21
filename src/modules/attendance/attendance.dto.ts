@@ -46,6 +46,15 @@ export const attendanceSettingsDto = z.object({
     .number()
     .min(0, "Hệ số lương OT phải lớn hơn hoặc bằng 0")
     .max(10, "Hệ số lương OT không được vượt quá 10"),
+  holidayRate: z.coerce
+    .number()
+    .min(0, "Hệ số lương ngày lễ phải lớn hơn hoặc bằng 0")
+    .max(10, "Hệ số lương ngày lễ không được vượt quá 10"),
+  weeklyDaysOff: z
+    .array(z.coerce.number().int().min(0, "Thứ nghỉ không hợp lệ").max(6, "Thứ nghỉ không hợp lệ"))
+    .max(7, "Số ngày nghỉ hằng tuần không hợp lệ")
+    .optional()
+    .default([0]),
 });
 
 export const attendanceMonthSettingDto = z.object({
@@ -72,6 +81,8 @@ const holidayBonusAmount = z.coerce
 
 const holidayInput = z.object({
   date: dateOnly,
+  name: z.string().trim().max(150, "Tên ngày lễ quá dài").optional(),
+  isPaid: z.coerce.boolean().optional().default(true),
   amount: holidayBonusAmount.default(0),
 });
 

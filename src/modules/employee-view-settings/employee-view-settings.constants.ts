@@ -17,6 +17,7 @@ export const payrollEmployeeViewColumns = [
   "totalWorkDay",
   "earnedSalary",
   "overtimeTotal",
+  "bonusTotal",
   "grossSalary",
   "employerInsuranceTotal",
   "insuranceTotal",

@@ -32,8 +32,11 @@ import type {
 } from "./payroll.dto";
 
 const DEFAULT_OVERTIME_RATE = 1.5;
+const DEFAULT_HOLIDAY_RATE = 2;
 const DEFAULT_TRANSFER_DEBIT_ACCOUNT = "111003013254";
 const DEFAULT_TRANSFER_BANK_CODE = "79321001";
+const DEFAULT_WEEKLY_DAYS_OFF = [0];
+const MINUTES_PER_WORK_DAY = 8 * 60;
 const DEFAULT_FORMULA_SETTING: PayrollFormulaSettingDto = DEFAULT_PAYROLL_FORMULA_SETTING;
 
 type FormulaAuditUser = {
@@ -89,7 +92,7 @@ export class PayrollService {
     }
 
     const dateRange = getMonthRange(dto.month, dto.year);
-    const [summaries, employees, allowances, deductions] = await Promise.all([
+    const [summaries, employees, allowances, deductions, holidays, attendanceSettings] = await Promise.all([
       this.attendanceRepository.find({
         where: { workDate: Between(dateRange.from, dateRange.to) },
         relations: { employee: true },
@@ -97,13 +100,16 @@ export class PayrollService {
       this.employeeRepository.find({ where: { status: "active" } }),
       this.allowanceRepository.find({ where: { isActive: true }, relations: { employee: true } }),
       this.deductionRepository.find({ where: { isActive: true }, relations: { employee: true } }),
+      this.holidayRepository.find({ where: { holidayDate: Between(dateRange.from, dateRange.to) } }),
+      this.attendanceSettingRepository.findOne({ where: {}, order: { createdAt: "ASC" } }),
     ]);
 
     const summariesByEmployee = groupByEmployee(summaries);
     const monthSetting = await this.getPayrollMonthSetting(dto.month, dto.year);
     const standardWorkDay = monthSetting.standardWorkDay;
-    const holidayBonusTotal = monthSetting.holidayBonusTotal;
-    const overtimeRate = await this.getOvertimeRate();
+    const holidaysByDate = new Map(holidays.map((holiday) => [holiday.holidayDate, holiday]));
+    const holidayRate = Number(attendanceSettings?.holidayRate ?? DEFAULT_HOLIDAY_RATE);
+    const overtimeRate = Number(attendanceSettings?.overtimeRate ?? DEFAULT_OVERTIME_RATE);
     const formulaSetting = dto.formulaSetting
       ? normalizeFormulaSettingSnapshot(dto.formulaSetting)
       : await this.getFormulaSetting();
@@ -119,8 +125,8 @@ export class PayrollService {
         allowances: employeeAllowances,
         deductions: employeeDeductions,
         standardWorkDay,
-        holidayBonusTotal,
-        holidayPaidDays: monthSetting.holidayPaidDays,
+        holidaysByDate,
+        holidayRate,
         overtimeRate,
         formulaSetting,
       });
@@ -513,32 +519,16 @@ export class PayrollService {
     allowances: Allowance[];
     deductions: Deduction[];
     standardWorkDay: number;
-    holidayBonusTotal: number;
-    holidayPaidDays: number;
+    holidaysByDate: Map<string, Holiday>;
+    holidayRate: number;
     overtimeRate: number;
     formulaSetting: PayrollFormulaSettingDto;
   }) {
-    const workDay = sum(input.summaries.map((summary) => Number(summary.workDay)));
-    const overtimeMinutes = sum(input.summaries.map((summary) => summary.overtimeMinutes));
-    const payrollFormula = calculateExcelPayroll({
-      actualSalary: Number(input.employee.baseSalary),
-      workDay,
-      standardWorkDay: input.standardWorkDay,
-      overtimeMinutes,
-      overtimeRate: input.overtimeRate,
-      holidayBonusTotal: input.holidayBonusTotal,
-      insuranceSalary: input.formulaSetting.insuranceBaseSalary,
-      employeeInsuranceRate: input.formulaSetting.employeeInsuranceRate,
-      employerInsuranceRate: input.formulaSetting.employerInsuranceRate,
-      defaultMealAllowance: input.formulaSetting.defaultMealAllowance,
-      defaultPhoneAllowance: input.formulaSetting.defaultPhoneAllowance,
-      formulas: {
-        columnFormulas: input.formulaSetting.columnFormulas,
-      },
-      allowances: input.allowances,
-      deductions: input.deductions,
-    });
-
+    const holidayWorkStats = getEmployeeHolidayWorkStats(input.summaries, input.holidaysByDate);
+    const regularSummaries = input.summaries.filter((summary) => !input.holidaysByDate.has(summary.workDate));
+    const attendanceWorkDay = sum(regularSummaries.map((summary) => Number(summary.workDay)));
+    const workDay = roundNumber(attendanceWorkDay);
+    const overtimeMinutes = sum(regularSummaries.map((summary) => summary.overtimeMinutes));
     const existingRecord = await this.recordRepository.findOne({
       where: {
         employee: { id: input.employee.id },
@@ -553,7 +543,29 @@ export class PayrollService {
         year: input.period.year,
       },
     });
-    const manualBonus = existingRecord ? Number(existingRecord.bonus) : Number(monthlyBonus?.amount ?? 0);
+    const manualBonus = Number(monthlyBonus?.amount ?? existingRecord?.bonus ?? 0);
+    const payrollFormula = calculateExcelPayroll({
+      actualSalary: Number(input.employee.baseSalary),
+      workDay,
+      standardWorkDay: input.standardWorkDay,
+      overtimeMinutes,
+      overtimeRate: input.overtimeRate,
+      holidayWorkDay: holidayWorkStats.workDay,
+      holidayRate: input.holidayRate,
+      holidayFixedBonusTotal: holidayWorkStats.fixedBonusTotal,
+      insuranceSalary: input.formulaSetting.insuranceBaseSalary,
+      employeeInsuranceRate: input.formulaSetting.employeeInsuranceRate,
+      employerInsuranceRate: input.formulaSetting.employerInsuranceRate,
+      defaultMealAllowance: input.formulaSetting.defaultMealAllowance,
+      defaultPhoneAllowance: input.formulaSetting.defaultPhoneAllowance,
+      monthlyBonus: manualBonus,
+      formulas: {
+        columnFormulas: input.formulaSetting.columnFormulas,
+      },
+      allowances: input.allowances,
+      deductions: input.deductions,
+    });
+
     const record = existingRecord ?? this.recordRepository.create();
 
     this.recordRepository.merge(record, {
@@ -574,9 +586,7 @@ export class PayrollService {
       totalWorkDay: String(payrollFormula.totalWorkDay),
       allowanceTotal: String(payrollFormula.allowanceTotal),
       bonusTotal: String(payrollFormula.bonusTotal),
-      // bonus (thưởng) is set manually per employee — preserve existing value on recalculate,
-      // or restore the monthly employee bonus when a record is recreated after attendance reset.
-      bonus: String(manualBonus),
+      bonus: String(payrollFormula.bonus),
       overtimeTotal: String(payrollFormula.overtimeSalary),
       grossSalary: String(payrollFormula.grossSalary),
       employerInsuranceTotal: String(payrollFormula.employerInsuranceTotal),
@@ -585,7 +595,7 @@ export class PayrollService {
       taxTotal: String(payrollFormula.personalIncomeTax),
       advanceTotal: String(payrollFormula.advanceTotal),
       deductionTotal: String(payrollFormula.totalDeduction),
-      netSalary: String(payrollFormula.netSalary + manualBonus),
+      netSalary: String(payrollFormula.netSalary),
       status: input.period.status,
     });
 
@@ -604,13 +614,18 @@ export class PayrollService {
           amount: payrollFormula.earnedSalary,
         },
         {
+          type: "base",
+          label: `Ngày lễ đi làm: ${holidayWorkStats.workDay} công x hệ số ${formatMultiplier(input.holidayRate)}`,
+          amount: 0,
+        },
+        {
           type: "overtime",
           label: `${roundNumber(overtimeMinutes / 60)} giờ tăng ca x hệ số ${input.overtimeRate}`,
           amount: payrollFormula.overtimeSalary,
         },
         {
           type: "gross",
-          label: "Tổng lương = Lương trong tháng + Lương làm thêm giờ",
+          label: "Tổng lương = Lương trong tháng + Lương làm thêm giờ + Lương ngày lễ",
           amount: payrollFormula.grossSalary,
         },
         ...payrollFormula.formulaDetails.map((detail) => ({
@@ -626,7 +641,7 @@ export class PayrollService {
         { type: "tax", label: "Thuế thu nhập cá nhân", amount: -payrollFormula.personalIncomeTax },
         { type: "deduction", label: "Tạm ứng / khấu trừ khác", amount: -payrollFormula.advanceTotal },
         { type: "deduction", label: "Tổng cộng các khoản giảm trừ", amount: -payrollFormula.totalDeduction },
-        { type: "bonus", label: `Tiền cộng ngày lễ ${input.holidayPaidDays} ngày`, amount: payrollFormula.bonusTotal },
+        { type: "bonus", label: `Lương ngày lễ ${holidayWorkStats.workDay} công`, amount: payrollFormula.bonusTotal },
       ].map((detail) =>
         this.detailRepository.create({
           salaryRecord: savedRecord,
@@ -845,33 +860,34 @@ export class PayrollService {
     };
   }
 
-  private async getOvertimeRate() {
+  private async getWeeklyDaysOff() {
     const settings = await this.attendanceSettingRepository.findOne({
       where: {},
       order: { createdAt: "ASC" },
     });
 
-    return Number(settings?.overtimeRate ?? DEFAULT_OVERTIME_RATE);
+    return normalizeWeeklyDaysOff(settings?.weeklyDaysOff);
   }
 
   private async getPayrollMonthSetting(month: number, year: number) {
-    const holidayStats = await this.getPaidHolidayStats(month, year);
+    const weeklyDaysOff = await this.getWeeklyDaysOff();
+    const holidayStats = await this.getPaidHolidayStats(month, year, weeklyDaysOff);
     const holidayPaidDays = holidayStats.paidDays;
 
     return {
-      standardWorkDay: Math.max(0, countStandardWorkDays(month, year) - holidayPaidDays),
+      standardWorkDay: countStandardWorkDays(month, year, weeklyDaysOff),
       holidayPaidDays,
       holidayBonusAmount: holidayPaidDays > 0 ? roundCurrency(holidayStats.bonusTotal / holidayPaidDays) : 0,
       holidayBonusTotal: holidayStats.bonusTotal,
     };
   }
 
-  private async getPaidHolidayStats(month: number, year: number) {
+  private async getPaidHolidayStats(month: number, year: number, weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF) {
     const { from, to } = getMonthRange(month, year);
     const holidays = await this.holidayRepository.find({
       where: { holidayDate: Between(from, to), isPaid: true },
     });
-    const paidHolidays = holidays.filter((holiday) => !isSunday(holiday.holidayDate));
+    const paidHolidays = holidays.filter((holiday) => !isWeeklyDayOff(holiday.holidayDate, weeklyDaysOff));
     return {
       paidDays: paidHolidays.length,
       bonusTotal: roundCurrency(sum(paidHolidays.map((holiday) => Number(holiday.bonusAmount ?? 0)))),
@@ -938,13 +954,14 @@ export function getMonthRange(month: number, year: number) {
   return { from, to };
 }
 
-function countStandardWorkDays(month: number, year: number) {
+function countStandardWorkDays(month: number, year: number, weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF) {
   const daysInMonth = new Date(year, month, 0).getDate();
   let workDays = 0;
+  const daysOff = new Set(normalizeWeeklyDaysOff(weeklyDaysOff));
 
   for (let day = 1; day <= daysInMonth; day += 1) {
     const date = new Date(year, month - 1, day);
-    if (date.getDay() !== 0) {
+    if (!daysOff.has(date.getDay())) {
       workDays += 1;
     }
   }
@@ -952,9 +969,28 @@ function countStandardWorkDays(month: number, year: number) {
   return workDays;
 }
 
-function isSunday(value: string) {
+function normalizeWeeklyDaysOff(value: unknown = DEFAULT_WEEKLY_DAYS_OFF) {
+  const rawValues = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",")
+      : value === undefined || value === null
+        ? []
+        : [value];
+  const days = Array.from(
+    new Set(
+      rawValues
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item >= 0 && item <= 6),
+    ),
+  ).sort((left, right) => left - right);
+
+  return days.length > 0 ? days : [...DEFAULT_WEEKLY_DAYS_OFF];
+}
+
+function isWeeklyDayOff(value: string, weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF) {
   const [year, month, day] = value.split("-").map(Number);
-  return new Date(year, month - 1, day).getDay() === 0;
+  return new Set(normalizeWeeklyDaysOff(weeklyDaysOff)).has(new Date(year, month - 1, day).getDay());
 }
 
 function sum(values: number[]) {
@@ -1012,6 +1048,12 @@ function normalizeDefaultDailyAllowanceFormula(key: PayrollFormulaColumnKey, for
   }
   if (key === "phoneAllowance" && compactFormula === "phuCapDienThoai/ngayCong") {
     return "dienThoaiMacDinh";
+  }
+  if (key === "netSalary" && compactFormula === "tongLuong-tongGiamTru") {
+    return "tongLuong - tongGiamTru + thuong";
+  }
+  if (key === "grossSalary" && compactFormula === "luongThang+luongTangCa") {
+    return "luongThang + luongTangCa + thuongLe";
   }
   return formula;
 }
@@ -1110,6 +1152,45 @@ function isDeductionFormulaKey(key: PayrollFormulaColumnKey) {
   return ["insuranceTotal", "taxTotal", "advanceTotal", "deductionTotal"].includes(key);
 }
 
+function getEmployeeHolidayWorkStats(summaries: AttendanceSummary[], holidaysByDate: Map<string, Holiday>) {
+  let workDay = 0;
+  let fixedBonusTotal = 0;
+
+  for (const summary of summaries) {
+    const holiday = holidaysByDate.get(summary.workDate);
+    if (!holiday) {
+      continue;
+    }
+
+    const workedMinutes = getSummaryWorkedMinutes(summary);
+    const summaryWorkDay = workedMinutes > 0 ? Math.min(1, roundNumber(workedMinutes / MINUTES_PER_WORK_DAY)) : 0;
+    if (summaryWorkDay <= 0) {
+      continue;
+    }
+
+    workDay += summaryWorkDay;
+    fixedBonusTotal += Number(holiday.bonusAmount ?? 0) * summaryWorkDay;
+  }
+
+  return {
+    workDay: roundNumber(workDay),
+    fixedBonusTotal: roundCurrency(fixedBonusTotal),
+  };
+}
+
+function getSummaryWorkedMinutes(summary: AttendanceSummary) {
+  const overtimeMinutes = Number(summary.overtimeMinutes ?? 0);
+  if (overtimeMinutes > 0) {
+    return overtimeMinutes;
+  }
+
+  if (summary.checkInAt && summary.checkOutAt) {
+    return Math.max(0, Math.round((summary.checkOutAt.getTime() - summary.checkInAt.getTime()) / 60_000));
+  }
+
+  return Math.max(0, Number(summary.workDay ?? 0) * MINUTES_PER_WORK_DAY);
+}
+
 function formatDateTime(value: Date) {
   return new Intl.DateTimeFormat("vi-VN", {
     dateStyle: "short",
@@ -1120,6 +1201,10 @@ function formatDateTime(value: Date) {
 
 function formatPercent(value: number) {
   return `${new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 2 }).format(value)}%`;
+}
+
+function formatMultiplier(value: number) {
+  return new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 2 }).format(value);
 }
 
 function filterPayrollRecord<TRecord extends Record<string, unknown>>(
