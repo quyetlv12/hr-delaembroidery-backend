@@ -336,7 +336,7 @@ export class DashboardService {
       .getMany();
     const checkedEmployeeIds = new Set(
       summaries
-        .filter((summary) => Boolean(summary[currentShift.checkInProperty]))
+        .filter((summary) => hasCurrentShiftPunch(summary, currentShift, settings))
         .map((summary) => summary.employee.id),
     );
     const rows = employees
@@ -421,6 +421,52 @@ type CurrentShift = {
   minShiftCount: number;
   checkInProperty: "morningCheckInAt" | "afternoonCheckInAt" | "nightCheckInAt";
 };
+
+const SHIFT_CHECK_IN_TOLERANCE_MINUTES = 45;
+
+function hasCurrentShiftPunch(
+  summary: AttendanceSummary,
+  currentShift: CurrentShift,
+  settings: AttendanceSettingsForShift,
+) {
+  if (summary[currentShift.checkInProperty]) {
+    return true;
+  }
+
+  const startMinutes = timeToMinutes(currentShift.startTime);
+  const endMinutes = getShiftFallbackEndMinutes(currentShift, settings);
+  return getSummaryPunchMinutes(summary).some((minutes) =>
+    isWithinTimeRange(minutes, startMinutes - SHIFT_CHECK_IN_TOLERANCE_MINUTES, endMinutes),
+  );
+}
+
+function getSummaryPunchMinutes(summary: AttendanceSummary) {
+  return [
+    summary.checkInAt,
+    summary.checkOutAt,
+    summary.morningCheckInAt,
+    summary.morningCheckOutAt,
+    summary.afternoonCheckInAt,
+    summary.afternoonCheckOutAt,
+    summary.nightCheckInAt,
+    summary.nightCheckOutAt,
+  ]
+    .map((value) => {
+      const formattedTime = formatVietnamTime(value);
+      return formattedTime ? timeToMinutes(formattedTime) : null;
+    })
+    .filter((value): value is number => value !== null);
+}
+
+function getShiftFallbackEndMinutes(currentShift: CurrentShift, settings: AttendanceSettingsForShift) {
+  if (currentShift.key === "morning") {
+    return timeToMinutes(settings.afternoonStart);
+  }
+  if (currentShift.key === "afternoon") {
+    return timeToMinutes(settings.nightStart);
+  }
+  return timeToMinutes(currentShift.endTime);
+}
 
 function resolveCurrentShift(settings: AttendanceSettingsForShift, now: Date): CurrentShift | null {
   const vietnamTime = getVietnamDateParts(now);
