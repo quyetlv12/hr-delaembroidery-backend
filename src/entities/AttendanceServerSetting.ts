@@ -28,6 +28,15 @@ export class AttendanceServerSetting extends AppBaseEntity {
   @Column({ name: "auto_sync_month_mappings", type: "json", nullable: true })
   autoSyncMonthMappings?: Array<{ period: string; monthDataId: string }> | null;
 
+  @Column({ name: "auto_sync_shift_windows", type: "json", nullable: true })
+  autoSyncShiftWindows?: Array<{
+    key: "morning" | "afternoon" | "night";
+    enabled: boolean;
+    startTime: string;
+    endTime: string;
+    intervalMinutes: number;
+  }> | null;
+
   @Column({ name: "auto_sync_start_offset_minutes", type: "int", default: 60 })
   autoSyncStartOffsetMinutes!: number;
 

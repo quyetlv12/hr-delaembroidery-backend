@@ -75,9 +75,19 @@ export const payrollRecordUpdateDto = z
     message: "Vui lòng nhập dữ liệu cần cập nhật",
   });
 
+export const payrollPayslipEmailDto = z.object({
+  recordIds: z.array(z.string().uuid()).min(1, "Vui lòng chọn nhân viên cần gửi phiếu lương"),
+});
+
+export const payrollPayslipTestEmailDto = z.object({
+  email: z.string().trim().email("Email nhận test không hợp lệ").max(255),
+});
+
 export type PayrollPeriodDto = z.infer<typeof payrollPeriodDto>;
 export type PayrollFormulaColumnKey = (typeof payrollFormulaColumnKeys)[number];
 export type PayrollFormulaColumnDto = z.infer<typeof payrollFormulaColumnDto>;
 export type PayrollFormulaSettingDto = z.infer<typeof payrollFormulaSettingDto>;
 export type PayrollFormulaTemplateCreateDto = z.infer<typeof payrollFormulaTemplateCreateDto>;
 export type PayrollRecordUpdateDto = z.infer<typeof payrollRecordUpdateDto>;
+export type PayrollPayslipEmailDto = z.infer<typeof payrollPayslipEmailDto>;
+export type PayrollPayslipTestEmailDto = z.infer<typeof payrollPayslipTestEmailDto>;

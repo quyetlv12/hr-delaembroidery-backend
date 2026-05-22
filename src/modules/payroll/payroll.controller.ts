@@ -8,6 +8,8 @@ import { PayrollRecordEditService } from "./payroll-record-edit.service";
 import type {
   PayrollFormulaSettingDto,
   PayrollFormulaTemplateCreateDto,
+  PayrollPayslipEmailDto,
+  PayrollPayslipTestEmailDto,
   PayrollPeriodDto,
   PayrollRecordUpdateDto,
 } from "./payroll.dto";
@@ -161,4 +163,30 @@ export async function exportPayrollTransferFileController(req: Request, res: Res
   res.setHeader("Content-Type", file.contentType);
   res.setHeader("Content-Disposition", `attachment; filename="${file.fileName}"`);
   return res.send(file.buffer);
+}
+
+export async function sendPayrollPayslipEmailsController(
+  req: Request<{ id: string }, unknown, PayrollPayslipEmailDto>,
+  res: Response,
+) {
+  const id = req.params.id;
+  if (typeof id !== "string") {
+    throw new HttpError(400, "INVALID_PAYROLL_PERIOD_ID", "ID kỳ lương không hợp lệ");
+  }
+
+  const result = await payrollService.sendPayslipEmails(id, req.body.recordIds, req.user);
+  return ok(res, result, "Đã gửi email phiếu lương");
+}
+
+export async function sendPayrollPayslipTestEmailController(
+  req: Request<{ id: string }, unknown, PayrollPayslipTestEmailDto>,
+  res: Response,
+) {
+  const id = req.params.id;
+  if (typeof id !== "string") {
+    throw new HttpError(400, "INVALID_SALARY_RECORD_ID", "ID dòng bảng lương không hợp lệ");
+  }
+
+  const result = await payrollService.sendPayslipTestEmail(id, req.body.email);
+  return ok(res, result, "Đã gửi email test phiếu lương");
 }

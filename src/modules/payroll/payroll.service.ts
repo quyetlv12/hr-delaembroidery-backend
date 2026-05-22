@@ -1,7 +1,12 @@
+import { existsSync } from "node:fs";
+
+import nodemailer from "nodemailer";
+import PDFDocument from "pdfkit";
 import * as XLSX from "xlsx";
-import { Between, Not } from "typeorm";
+import { Between, In, Not } from "typeorm";
 
 import { HttpError } from "../../common/http-error";
+import { formatVietnamTime, getDaysInVietnamMonth, getVietnamDayOfWeek } from "../../common/vietnam-time";
 import { AppDataSource } from "../../database/data-source";
 import {
   Allowance,
@@ -15,14 +20,17 @@ import {
   PayrollFormulaSetting,
   PayrollFormulaTemplate,
   SalaryDetail,
+  SalaryEmailLog,
   SalaryPeriod,
   SalaryRecord,
+  User,
 } from "../../entities";
 import {
   payrollEmployeeViewColumns,
   type PayrollEmployeeViewColumn,
 } from "../employee-view-settings/employee-view-settings.constants";
 import { EmployeeViewSettingsService } from "../employee-view-settings/employee-view-settings.service";
+import { EmailSettingsService, type EmailTransportSettings } from "../email-settings/email-settings.service";
 import { calculateExcelPayroll, DEFAULT_PAYROLL_FORMULA_SETTING } from "./payroll-formula";
 import type {
   PayrollFormulaColumnKey,
@@ -44,6 +52,16 @@ type FormulaAuditUser = {
   loginCode?: string;
 };
 
+type PayslipEmailResult = {
+  recordId: string;
+  employeeId: string;
+  employeeCode: string;
+  employeeName: string;
+  email: string;
+  status: "sent" | "failed";
+  errorMessage?: string;
+};
+
 export class PayrollService {
   private readonly attendanceRepository = AppDataSource.getRepository(AttendanceSummary);
   private readonly attendanceSettingRepository = AppDataSource.getRepository(AttendanceSetting);
@@ -54,11 +72,13 @@ export class PayrollService {
   private readonly periodRepository = AppDataSource.getRepository(SalaryPeriod);
   private readonly recordRepository = AppDataSource.getRepository(SalaryRecord);
   private readonly detailRepository = AppDataSource.getRepository(SalaryDetail);
+  private readonly emailLogRepository = AppDataSource.getRepository(SalaryEmailLog);
   private readonly monthlyBonusRepository = AppDataSource.getRepository(EmployeeMonthlyBonus);
   private readonly formulaSettingRepository = AppDataSource.getRepository(PayrollFormulaSetting);
   private readonly formulaHistoryRepository = AppDataSource.getRepository(PayrollFormulaHistory);
   private readonly formulaTemplateRepository = AppDataSource.getRepository(PayrollFormulaTemplate);
   private readonly employeeViewSettingsService = new EmployeeViewSettingsService();
+  private readonly emailSettingsService = new EmailSettingsService();
 
   async list(dto: PayrollPeriodDto, employeeId?: string) {
     const period = await this.findPeriod(dto.month, dto.year);
@@ -512,6 +532,194 @@ export class PayrollService {
     };
   }
 
+  async sendPayslipEmails(periodId: string, recordIds: string[], user?: FormulaAuditUser) {
+    const period = await this.periodRepository.findOne({ where: { id: periodId } });
+    if (!period) {
+      throw new HttpError(404, "SALARY_PERIOD_NOT_FOUND", "Không tìm thấy kỳ lương");
+    }
+
+    const uniqueRecordIds = Array.from(new Set(recordIds));
+    const records = await this.recordRepository.find({
+      where: {
+        id: In(uniqueRecordIds),
+        salaryPeriod: { id: periodId },
+      },
+      relations: {
+        employee: {
+          department: true,
+          position: true,
+        },
+        details: true,
+        salaryPeriod: true,
+      },
+      order: {
+        employee: {
+          employeeCode: "ASC",
+        },
+      },
+    });
+
+    if (records.length === 0) {
+      throw new HttpError(422, "PAYROLL_RECORDS_EMPTY", "Không có dòng lương nào để gửi phiếu lương");
+    }
+    if (records.length !== uniqueRecordIds.length) {
+      throw new HttpError(422, "PAYROLL_RECORDS_MISMATCH", "Một số dòng lương không thuộc kỳ đang chọn");
+    }
+
+    const mailSettings = await this.emailSettingsService.resolveEffectiveSettings();
+    const transporter = createMailTransporter(mailSettings);
+    const results: PayslipEmailResult[] = [];
+
+    for (const record of records) {
+      const email = record.employee.email?.trim() ?? "";
+      const baseResult = {
+        recordId: record.id,
+        employeeId: record.employee.id,
+        employeeCode: record.employee.employeeCode,
+        employeeName: record.employee.fullName,
+        email,
+      };
+
+      if (!email) {
+        const errorMessage = "Nhân viên chưa có email";
+        await this.savePayslipEmailLog(record, email, "failed", errorMessage, user);
+        results.push({ ...baseResult, status: "failed", errorMessage });
+        continue;
+      }
+
+      try {
+        const attendanceRows = await this.getPayslipAttendanceRows(record);
+        const pdfBuffer = await createPayslipPdf(record, attendanceRows);
+        await transporter.sendMail({
+          from: mailSettings.mailFrom,
+          to: email,
+          subject: `Phiếu lương tháng ${String(period.month).padStart(2, "0")}/${period.year}`,
+          text: `Chào ${record.employee.fullName},\n\nHR gửi bạn phiếu lương tháng ${String(period.month).padStart(2, "0")}/${period.year} trong file PDF đính kèm.\n\nTrân trọng.`,
+          attachments: [
+            {
+              filename: `phieu-luong-${record.employee.employeeCode}-${String(period.month).padStart(2, "0")}-${period.year}.pdf`,
+              content: pdfBuffer,
+              contentType: "application/pdf",
+            },
+          ],
+        });
+        await this.savePayslipEmailLog(record, email, "sent", null, user);
+        results.push({ ...baseResult, status: "sent" });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "Gửi email thất bại";
+        await this.savePayslipEmailLog(record, email, "failed", errorMessage, user);
+        results.push({ ...baseResult, status: "failed", errorMessage });
+      }
+    }
+
+    return {
+      total: results.length,
+      sent: results.filter((result) => result.status === "sent").length,
+      failed: results.filter((result) => result.status === "failed").length,
+      results,
+    };
+  }
+
+  async sendPayslipTestEmail(recordId: string, email: string) {
+    const record = await this.recordRepository.findOne({
+      where: { id: recordId },
+      relations: {
+        employee: {
+          department: true,
+          position: true,
+        },
+        details: true,
+        salaryPeriod: true,
+      },
+    });
+
+    if (!record) {
+      throw new HttpError(404, "SALARY_RECORD_NOT_FOUND", "Không tìm thấy dòng bảng lương");
+    }
+
+    const mailSettings = await this.emailSettingsService.resolveEffectiveSettings();
+    const transporter = createMailTransporter(mailSettings);
+    let pdfBuffer: Buffer;
+    try {
+      const attendanceRows = await this.getPayslipAttendanceRows(record);
+      pdfBuffer = await createPayslipPdf(record, attendanceRows);
+    } catch (error) {
+      throw new HttpError(500, "PAYSLIP_PDF_GENERATION_FAILED", "Không tạo được file PDF phiếu lương để gửi test", {
+        reason: getErrorMessage(error),
+      });
+    }
+
+    const periodText = `${String(record.salaryPeriod.month).padStart(2, "0")}/${record.salaryPeriod.year}`;
+    let info: Awaited<ReturnType<typeof transporter.sendMail>>;
+    try {
+      info = await transporter.sendMail({
+        from: mailSettings.mailFrom,
+        to: email,
+        subject: `[Test] Phiếu lương tháng ${periodText} - ${record.employee.fullName}`,
+        text: [
+          `Đây là email test phiếu lương tháng ${periodText}.`,
+          `Nhân viên trên phiếu lương: ${record.employee.fullName} (${record.employee.employeeCode}).`,
+          "",
+          "Email này được gửi tới địa chỉ test do admin nhập, không gửi tới email nhân viên.",
+        ].join("\n"),
+        attachments: [
+          {
+            filename: `test-phieu-luong-${record.employee.employeeCode}-${String(record.salaryPeriod.month).padStart(2, "0")}-${record.salaryPeriod.year}.pdf`,
+            content: pdfBuffer,
+            contentType: "application/pdf",
+          },
+        ],
+      });
+    } catch (error) {
+      throw new HttpError(502, "PAYSLIP_TEST_EMAIL_FAILED", "Không gửi được email test phiếu lương", {
+        reason: getErrorMessage(error),
+      });
+    }
+
+    return {
+      recordId: record.id,
+      employeeId: record.employee.id,
+      employeeCode: record.employee.employeeCode,
+      employeeName: record.employee.fullName,
+      originalEmployeeEmail: record.employee.email?.trim() ?? "",
+      email,
+      messageId: info.messageId,
+      sentAt: new Date().toISOString(),
+    };
+  }
+
+  private async savePayslipEmailLog(
+    record: SalaryRecord,
+    email: string,
+    status: "sent" | "failed",
+    errorMessage: string | null,
+    user?: FormulaAuditUser,
+  ) {
+    await this.emailLogRepository.save(
+      this.emailLogRepository.create({
+        employee: record.employee,
+        salaryPeriod: record.salaryPeriod,
+        salaryRecord: record,
+        email,
+        status,
+        sentAt: status === "sent" ? new Date() : null,
+        errorMessage,
+        sentBy: user?.id ? ({ id: user.id } as User) : null,
+      }),
+    );
+  }
+
+  private async getPayslipAttendanceRows(record: SalaryRecord) {
+    const dateRange = getMonthRange(record.salaryPeriod.month, record.salaryPeriod.year);
+    return this.attendanceRepository.find({
+      where: {
+        employee: { id: record.employee.id },
+        workDate: Between(dateRange.from, dateRange.to),
+      },
+      order: { workDate: "ASC" },
+    });
+  }
+
   private async upsertRecord(input: {
     employee: Employee;
     period: SalaryPeriod;
@@ -911,12 +1119,379 @@ function getPrimaryBankAccount(bankAccounts: SalaryRecord["employee"]["bankAccou
   return bankAccounts.find((bankAccount) => bankAccount.isPrimary) ?? bankAccounts[0];
 }
 
+function createMailTransporter(settings: EmailTransportSettings) {
+  return nodemailer.createTransport({
+    host: settings.smtpHost,
+    port: settings.smtpPort,
+    secure: settings.smtpPort === 465,
+    auth:
+      settings.smtpUser && settings.smtpPass
+        ? {
+            user: settings.smtpUser,
+            pass: settings.smtpPass,
+          }
+        : undefined,
+  });
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  return "Không rõ nguyên nhân";
+}
+
+type PdfTableColumn<T> = {
+  header: string;
+  width: number;
+  align?: "left" | "center" | "right";
+  getValue: (row: T) => string;
+};
+
+type PdfLabelValueRow = {
+  label: string;
+  value: string;
+};
+
+const PAYSLIP_PDF_OPTIONS = { margin: 28, size: "A4", layout: "landscape" } as const;
+
+async function createPayslipPdf(record: SalaryRecord, attendanceRows: AttendanceSummary[] = []) {
+  return new Promise<Buffer>((resolve, reject) => {
+    const document = new PDFDocument(PAYSLIP_PDF_OPTIONS);
+    const chunks: Buffer[] = [];
+    const fontPath = getPdfFontPath();
+    const normalizeText = fontPath ? (value: string) => value : toPdfSafeText;
+
+    document.on("data", (chunk: Buffer) => chunks.push(chunk));
+    document.on("end", () => resolve(Buffer.concat(chunks)));
+    document.on("error", reject);
+
+    if (fontPath) {
+      document.registerFont("Body", fontPath);
+      document.font("Body");
+    }
+
+    const periodLabel = `${String(record.salaryPeriod.month).padStart(2, "0")}/${record.salaryPeriod.year}`;
+    document.fillColor("#101828").fontSize(18).text(normalizeText("PHIẾU LƯƠNG"), { align: "center" });
+    document.moveDown(0.25);
+    document.fillColor("#344054").fontSize(10).text(normalizeText(`Kỳ lương: ${periodLabel}`), { align: "center" });
+    document.moveDown(0.8);
+
+    drawPdfSectionTitle(document, normalizeText, "Thông tin nhân viên");
+    drawPdfInfoTable(document, normalizeText, [
+      { label: "Mã nhân viên", value: record.employee.employeeCode },
+      { label: "Họ tên", value: record.employee.fullName },
+      { label: "Email", value: record.employee.email || "-" },
+      { label: "Phòng ban", value: record.employee.department?.name ?? "-" },
+      { label: "Chức vụ", value: record.employee.position?.name ?? "-" },
+      { label: "Ngày công", value: formatWorkDay(record.workDay) },
+      { label: "Thực nhận", value: formatCurrency(record.netSalary) },
+      { label: "Trạng thái", value: record.status },
+    ]);
+
+    drawPdfSectionTitle(document, normalizeText, "Bảng chấm công");
+    drawPdfTable(document, normalizeText, buildAttendancePdfColumns(), attendanceRows, {
+      emptyText: "Không có dữ liệu chấm công trong kỳ này",
+      rowHeight: 17,
+      fontSize: 7.5,
+    });
+
+    drawPdfSectionTitle(document, normalizeText, "Bảng lương");
+    const payrollRows = [
+      { label: "Lương cài đặt", value: formatCurrency(record.configuredSalary) },
+      { label: "Lương BHXH", value: formatCurrency(record.insuranceSalary) },
+      { label: "Ngày công", value: formatWorkDay(record.workDay) },
+      { label: "Lương cố định", value: formatCurrency(record.fixedDailySalary) },
+      { label: "Trách nhiệm", value: formatCurrency(record.responsibilityAllowance) },
+      { label: "Ăn ca", value: formatCurrency(record.mealAllowance) },
+      { label: "Điện thoại", value: formatCurrency(record.phoneAllowance) },
+      { label: "KPI", value: formatCurrency(record.kpiAllowance) },
+      { label: "Tổng lương ngày", value: formatCurrency(record.dailyTotal) },
+      { label: "Lương trong tháng", value: formatCurrency(record.baseSalary) },
+      { label: "Lương tăng ca", value: formatCurrency(record.overtimeTotal) },
+      { label: "Thưởng ngày lễ", value: formatCurrency(record.bonusTotal) },
+      { label: "Thưởng", value: formatCurrency(record.bonus) },
+      { label: "Tổng lương", value: formatCurrency(record.grossSalary) },
+      { label: "Tổng giảm trừ", value: formatCurrency(record.deductionTotal) },
+      { label: "Thực nhận", value: formatCurrency(record.netSalary) },
+    ];
+    drawPdfTable(document, normalizeText, buildLabelValuePdfColumns(), payrollRows, {
+      rowHeight: 18,
+      fontSize: 8.5,
+    });
+
+    if (record.details?.length) {
+      drawPdfSectionTitle(document, normalizeText, "Chi tiết phát sinh");
+      drawPdfTable(
+        document,
+        normalizeText,
+        buildLabelValuePdfColumns(),
+        record.details.map((detail) => ({ label: detail.label, value: formatCurrency(detail.amount) })),
+        { rowHeight: 18, fontSize: 8.5 },
+      );
+    }
+
+    ensurePdfSpace(document, 18);
+    document
+      .fontSize(9)
+      .fillColor("#667085")
+      .text(normalizeText(`Gửi lúc ${formatPdfDate(new Date())} bởi hệ thống nhân sự Dela Embroidery.`));
+    document.end();
+  });
+}
+
+function drawPdfSectionTitle(
+  document: PDFKit.PDFDocument,
+  normalizeText: (value: string) => string,
+  title: string,
+) {
+  ensurePdfSpace(document, 24);
+  document.moveDown(0.55);
+  document.fillColor("#101828").fontSize(11).text(normalizeText(title), document.page.margins.left, document.y, {
+    width: getPdfContentWidth(document),
+  });
+  document.moveDown(0.35);
+}
+
+function drawPdfInfoTable(
+  document: PDFKit.PDFDocument,
+  normalizeText: (value: string) => string,
+  rows: PdfLabelValueRow[],
+) {
+  const columns = [
+    { header: "Trường", width: 82, getValue: (row: PdfLabelValueRow) => row.label },
+    { header: "Giá trị", width: 150, getValue: (row: PdfLabelValueRow) => row.value },
+    { header: "Trường", width: 82, getValue: (row: PdfLabelValueRow) => row.label },
+    { header: "Giá trị", width: 150, getValue: (row: PdfLabelValueRow) => row.value },
+  ];
+  const pairedRows: PdfLabelValueRow[] = [];
+
+  for (let index = 0; index < rows.length; index += 2) {
+    const first = rows[index];
+    const second = rows[index + 1] ?? { label: "", value: "" };
+    pairedRows.push({
+      label: `${first.label}::${second.label}`,
+      value: `${first.value}::${second.value}`,
+    });
+  }
+
+  drawPdfTable(document, normalizeText, columns, pairedRows, {
+    rowHeight: 18,
+    fontSize: 8.5,
+    mapCellValue: (columnIndex, row) => {
+      const labels = row.label.split("::");
+      const values = row.value.split("::");
+      return columnIndex === 0 ? labels[0] : columnIndex === 1 ? values[0] : columnIndex === 2 ? labels[1] : values[1];
+    },
+  });
+}
+
+function drawPdfTable<T>(
+  document: PDFKit.PDFDocument,
+  normalizeText: (value: string) => string,
+  columns: PdfTableColumn<T>[],
+  rows: T[],
+  options: {
+    emptyText?: string;
+    rowHeight?: number;
+    headerHeight?: number;
+    fontSize?: number;
+    mapCellValue?: (columnIndex: number, row: T) => string;
+  } = {},
+) {
+  const rowHeight = options.rowHeight ?? 18;
+  const headerHeight = options.headerHeight ?? 18;
+  const fontSize = options.fontSize ?? 8;
+  const startX = document.page.margins.left;
+  const tableWidth = columns.reduce((total, column) => total + column.width, 0);
+  const drawHeader = () => {
+    ensurePdfSpace(document, headerHeight + rowHeight);
+    let x = startX;
+    const y = document.y;
+    for (const column of columns) {
+      drawPdfRect(document, x, y, column.width, headerHeight, "#eaf5fb", "#cfd9e3");
+      drawPdfText(document, normalizeText(column.header), x, y, column.width, headerHeight, {
+        align: column.align ?? "center",
+        color: "#0b2f4a",
+        fontSize,
+      });
+      x += column.width;
+    }
+    document.y = y + headerHeight;
+  };
+
+  drawHeader();
+
+  if (rows.length === 0) {
+    const y = document.y;
+    drawPdfRect(document, startX, y, tableWidth, rowHeight, "#ffffff", "#d8e1ea");
+    drawPdfText(document, normalizeText(options.emptyText ?? "Không có dữ liệu"), startX, y, tableWidth, rowHeight, {
+      align: "center",
+      color: "#667085",
+      fontSize,
+    });
+    document.y = y + rowHeight;
+    return;
+  }
+
+  rows.forEach((row, rowIndex) => {
+    if (document.y + rowHeight > getPdfBottomLimit(document)) {
+      document.addPage(PAYSLIP_PDF_OPTIONS);
+      drawHeader();
+    }
+
+    let x = startX;
+    const y = document.y;
+    const background = rowIndex % 2 === 0 ? "#ffffff" : "#f8fbfd";
+    for (const [columnIndex, column] of columns.entries()) {
+      const value = options.mapCellValue?.(columnIndex, row) ?? column.getValue(row);
+      drawPdfRect(document, x, y, column.width, rowHeight, background, "#d8e1ea");
+      drawPdfText(document, normalizeText(value || "-"), x, y, column.width, rowHeight, {
+        align: column.align ?? "left",
+        color: "#101828",
+        fontSize,
+      });
+      x += column.width;
+    }
+    document.y = y + rowHeight;
+  });
+}
+
+function drawPdfRect(
+  document: PDFKit.PDFDocument,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  fill: string,
+  stroke: string,
+) {
+  document.save().fillColor(fill).rect(x, y, width, height).fill().restore();
+  document.save().strokeColor(stroke).lineWidth(0.5).rect(x, y, width, height).stroke().restore();
+}
+
+function drawPdfText(
+  document: PDFKit.PDFDocument,
+  text: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  options: { align: "left" | "center" | "right"; color: string; fontSize: number },
+) {
+  document.fillColor(options.color).fontSize(options.fontSize).text(text, x + 4, y + 4, {
+    align: options.align,
+    height: Math.max(8, height - 8),
+    lineBreak: false,
+    width: Math.max(8, width - 8),
+  });
+}
+
+function buildAttendancePdfColumns(): PdfTableColumn<AttendanceSummary>[] {
+  return [
+    { header: "Ngày", width: 54, getValue: (row) => formatPdfDateOnly(row.workDate) },
+    { header: "Vào", width: 38, align: "center", getValue: (row) => formatPdfTime(row.checkInAt) },
+    { header: "Ra", width: 38, align: "center", getValue: (row) => formatPdfTime(row.checkOutAt) },
+    { header: "Ca 1 vào", width: 43, align: "center", getValue: (row) => formatPdfTime(row.morningCheckInAt) },
+    { header: "Ca 1 ra", width: 43, align: "center", getValue: (row) => formatPdfTime(row.morningCheckOutAt) },
+    { header: "Ca 2 vào", width: 43, align: "center", getValue: (row) => formatPdfTime(row.afternoonCheckInAt) },
+    { header: "Ca 2 ra", width: 43, align: "center", getValue: (row) => formatPdfTime(row.afternoonCheckOutAt) },
+    { header: "Ca 3 vào", width: 43, align: "center", getValue: (row) => formatPdfTime(row.nightCheckInAt) },
+    { header: "Ca 3 ra", width: 43, align: "center", getValue: (row) => formatPdfTime(row.nightCheckOutAt) },
+    { header: "Công", width: 36, align: "right", getValue: (row) => formatWorkDay(row.workDay) },
+    { header: "Trễ", width: 36, align: "right", getValue: (row) => formatPdfMinutes(row.lateMinutes) },
+    { header: "Sớm", width: 36, align: "right", getValue: (row) => formatPdfMinutes(row.earlyLeaveMinutes) },
+    { header: "Tăng ca", width: 45, align: "right", getValue: (row) => formatPdfMinutes(row.overtimeMinutes) },
+    { header: "Trạng thái", width: 60, align: "center", getValue: (row) => formatAttendanceStatus(row.status) },
+  ];
+}
+
+function buildLabelValuePdfColumns(): PdfTableColumn<PdfLabelValueRow>[] {
+  return [
+    { header: "Khoản mục", width: 230, getValue: (row) => row.label },
+    { header: "Giá trị", width: 170, align: "right", getValue: (row) => row.value },
+  ];
+}
+
+function ensurePdfSpace(document: PDFKit.PDFDocument, requiredHeight: number) {
+  if (document.y + requiredHeight > getPdfBottomLimit(document)) {
+    document.addPage(PAYSLIP_PDF_OPTIONS);
+  }
+}
+
+function getPdfBottomLimit(document: PDFKit.PDFDocument) {
+  return document.page.height - document.page.margins.bottom;
+}
+
+function getPdfContentWidth(document: PDFKit.PDFDocument) {
+  return document.page.width - document.page.margins.left - document.page.margins.right;
+}
+
+function getPdfFontPath() {
+  return [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+  ].find((path) => existsSync(path));
+}
+
+function toPdfSafeText(value: string) {
+  return removeVietnameseMarks(value).replace(/đ/g, "d").replace(/Đ/g, "D").replace(/₫/g, "VND");
+}
+
+function formatCurrency(value: unknown) {
+  return `${new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 }).format(roundCurrency(toFiniteNumber(value)))} đ`;
+}
+
+function formatWorkDay(value: unknown) {
+  return new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 2 }).format(roundNumber(toFiniteNumber(value)));
+}
+
+function formatPdfDate(value: Date) {
+  return new Intl.DateTimeFormat("vi-VN", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(value);
+}
+
+function formatPdfDateOnly(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return value || "-";
+  }
+  return `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`;
+}
+
+function formatPdfTime(value?: Date | null) {
+  return formatVietnamTime(value) ?? "-";
+}
+
+function formatPdfMinutes(value: unknown) {
+  return `${Math.round(toFiniteNumber(value))}p`;
+}
+
+function formatAttendanceStatus(value: string) {
+  const statusLabels: Record<string, string> = {
+    present: "Có mặt",
+    missing: "Thiếu chấm",
+    absent: "Nghỉ",
+    leave: "Nghỉ phép",
+    late: "Đi trễ",
+  };
+  return statusLabels[value] ?? value ?? "-";
+}
+
 function getDependentNote(record: SalaryRecord) {
   return record.details?.find((detail) => detail.label.toLocaleLowerCase("vi-VN").includes("phụ thuộc"))?.label ?? "";
 }
 
-function formatTransferAmount(value: number) {
-  return ` ${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(roundCurrency(value))} `;
+function formatTransferAmount(value: unknown) {
+  return ` ${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(roundCurrency(toFiniteNumber(value)))} `;
 }
 
 function normalizeTransferText(value: string) {
@@ -949,19 +1524,18 @@ function groupByEmployee(summaries: AttendanceSummary[]) {
 
 export function getMonthRange(month: number, year: number) {
   const from = `${year}-${String(month).padStart(2, "0")}-01`;
-  const toDate = new Date(year, month, 0);
-  const to = `${year}-${String(month).padStart(2, "0")}-${String(toDate.getDate()).padStart(2, "0")}`;
+  const to = `${year}-${String(month).padStart(2, "0")}-${String(getDaysInVietnamMonth(month, year)).padStart(2, "0")}`;
   return { from, to };
 }
 
 function countStandardWorkDays(month: number, year: number, weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF) {
-  const daysInMonth = new Date(year, month, 0).getDate();
+  const daysInMonth = getDaysInVietnamMonth(month, year);
   let workDays = 0;
   const daysOff = new Set(normalizeWeeklyDaysOff(weeklyDaysOff));
 
   for (let day = 1; day <= daysInMonth; day += 1) {
-    const date = new Date(year, month - 1, day);
-    if (!daysOff.has(date.getDay())) {
+    const date = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    if (!daysOff.has(getVietnamDayOfWeek(date))) {
       workDays += 1;
     }
   }
@@ -989,8 +1563,7 @@ function normalizeWeeklyDaysOff(value: unknown = DEFAULT_WEEKLY_DAYS_OFF) {
 }
 
 function isWeeklyDayOff(value: string, weeklyDaysOff: number[] = DEFAULT_WEEKLY_DAYS_OFF) {
-  const [year, month, day] = value.split("-").map(Number);
-  return new Set(normalizeWeeklyDaysOff(weeklyDaysOff)).has(new Date(year, month - 1, day).getDay());
+  return new Set(normalizeWeeklyDaysOff(weeklyDaysOff)).has(getVietnamDayOfWeek(value));
 }
 
 function sum(values: number[]) {
@@ -998,11 +1571,33 @@ function sum(values: number[]) {
 }
 
 function roundCurrency(value: number) {
-  return Math.round(value);
+  return Math.round(Number.isFinite(value) ? value : 0);
 }
 
 function roundNumber(value: number) {
-  return Math.round(value * 100) / 100;
+  const safeValue = Number.isFinite(value) ? value : 0;
+  return Math.round(safeValue * 100) / 100;
+}
+
+function toFiniteNumber(value: unknown, fallback = 0) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  if (typeof value === "string") {
+    const trimmedValue = value.trim();
+    const numberValue = Number(trimmedValue);
+    if (Number.isFinite(numberValue)) {
+      return numberValue;
+    }
+
+    const normalizedCurrencyValue = trimmedValue.replace(/[^\d,.-]/g, "").replace(/\./g, "").replace(",", ".");
+    const parsedCurrencyValue = Number(normalizedCurrencyValue);
+    return Number.isFinite(parsedCurrencyValue) ? parsedCurrencyValue : fallback;
+  }
+
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
 }
 
 function normalizeFormulaSettingSnapshot(value: unknown): PayrollFormulaSettingDto {

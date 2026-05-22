@@ -17,6 +17,7 @@ export { EmployeeMonthlyBonus } from "./EmployeeMonthlyBonus";
 export { EmployeeMonthlyBonusHistory } from "./EmployeeMonthlyBonusHistory";
 export { EmployeeSalaryHistory } from "./EmployeeSalaryHistory";
 export { EmployeeViewSetting } from "./EmployeeViewSetting";
+export { EmailSetting } from "./EmailSetting";
 export { Holiday } from "./Holiday";
 export { LeaveRequest } from "./LeaveRequest";
 export { Permission } from "./Permission";

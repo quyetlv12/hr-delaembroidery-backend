@@ -1,5 +1,6 @@
 import { MoreThan } from "typeorm";
 
+import { formatVietnamTime, getVietnamDateParts, toVietnamDateString } from "../../common/vietnam-time";
 import { AppDataSource } from "../../database/data-source";
 import { AttendanceSetting, AttendanceSummary, Employee, SalaryRecord } from "../../entities";
 
@@ -89,6 +90,7 @@ export class DashboardService {
   }
 
   private async getTodayLateEmployees(filter: DashboardFilter, today: string) {
+    const settings = await this.getAttendanceSettings();
     const qb = this.attendanceRepository
       .createQueryBuilder("attendance")
       .leftJoinAndSelect("attendance.employee", "employee")
@@ -115,6 +117,40 @@ export class DashboardService {
       firstCheckInAt: formatVietnamTime(
         summary.morningCheckInAt ?? summary.afternoonCheckInAt ?? summary.nightCheckInAt ?? summary.checkInAt,
       ),
+      attendance: {
+        date: summary.workDate,
+        workDay: Number(summary.workDay ?? 0),
+        lateMinutes: Number(summary.lateMinutes ?? 0),
+        earlyLeaveMinutes: Number(summary.earlyLeaveMinutes ?? 0),
+        overtimeMinutes: Number(summary.overtimeMinutes ?? 0),
+        status: summary.status,
+        shifts: [
+          {
+            key: "morning",
+            label: "Ca sáng",
+            plannedStart: settings.morningStart,
+            plannedEnd: settings.morningEnd,
+            checkInAt: formatVietnamTime(summary.morningCheckInAt),
+            checkOutAt: formatVietnamTime(summary.morningCheckOutAt),
+          },
+          {
+            key: "afternoon",
+            label: "Ca chiều",
+            plannedStart: settings.afternoonStart,
+            plannedEnd: settings.afternoonEnd,
+            checkInAt: formatVietnamTime(summary.afternoonCheckInAt),
+            checkOutAt: formatVietnamTime(summary.afternoonCheckOutAt),
+          },
+          {
+            key: "night",
+            label: "Ca 3",
+            plannedStart: settings.nightStart,
+            plannedEnd: settings.nightEnd,
+            checkInAt: formatVietnamTime(summary.nightCheckInAt),
+            checkOutAt: formatVietnamTime(summary.nightCheckOutAt),
+          },
+        ],
+      },
     }));
   }
 
@@ -350,17 +386,9 @@ function resolveRange(filter: DashboardFilter): { from: string; to: string } {
   const defaultTo = new Date(Date.UTC(now.year, now.month, 0));
 
   return {
-    from: filter.from ?? toDateString(defaultFrom),
-    to: filter.to ?? toDateString(defaultTo),
+    from: filter.from ?? toVietnamDateString(defaultFrom),
+    to: filter.to ?? toVietnamDateString(defaultTo),
   };
-}
-
-function toDateString(date: Date) {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
 }
 
 function formatMonthLabel(value: string) {
@@ -395,8 +423,8 @@ type CurrentShift = {
 };
 
 function resolveCurrentShift(settings: AttendanceSettingsForShift, now: Date): CurrentShift | null {
-  const vietnamTime = new Date(now.getTime() + VIETNAM_TIMEZONE_OFFSET_MS);
-  const currentMinutes = vietnamTime.getUTCHours() * 60 + vietnamTime.getUTCMinutes();
+  const vietnamTime = getVietnamDateParts(now);
+  const currentMinutes = vietnamTime.hour * 60 + vietnamTime.minute;
   const morningStart = timeToMinutes(settings.morningStart);
   const morningEnd = timeToMinutes(settings.morningEnd);
   const afternoonStart = timeToMinutes(settings.afternoonStart);
@@ -473,32 +501,4 @@ function isWithinTimeRange(currentMinutes: number, startMinutes: number, endMinu
 function timeToMinutes(value: string) {
   const [hours, minutes] = value.split(":").map(Number);
   return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
-}
-
-const VIETNAM_TIMEZONE_OFFSET_MS = 7 * 60 * 60 * 1000;
-
-function getVietnamDateParts(date: Date) {
-  const vietnamTime = new Date(date.getTime() + VIETNAM_TIMEZONE_OFFSET_MS);
-  return {
-    year: vietnamTime.getUTCFullYear(),
-    month: vietnamTime.getUTCMonth() + 1,
-    day: vietnamTime.getUTCDate(),
-  };
-}
-
-function formatVietnamTime(value?: Date | null) {
-  if (!value || Number.isNaN(value.getTime())) {
-    return null;
-  }
-
-  const vietnamTime = new Date(value.getTime() + VIETNAM_TIMEZONE_OFFSET_MS);
-  return `${String(vietnamTime.getUTCHours()).padStart(2, "0")}:${String(vietnamTime.getUTCMinutes()).padStart(
-    2,
-    "0",
-  )}`;
-}
-
-function toVietnamDateString(value: Date) {
-  const { year, month, day } = getVietnamDateParts(value);
-  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }

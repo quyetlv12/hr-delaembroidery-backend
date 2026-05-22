@@ -1,4 +1,5 @@
 import { AttendanceService } from "./attendance.service";
+import { getDaysInVietnamMonth } from "../../common/vietnam-time";
 import {
   DEFAULT_YUNATT_ATTENDANCE_ENDPOINT,
   AttendanceServerSettingsService,
@@ -77,7 +78,7 @@ export class AttendanceServerManualSyncService {
 
 function remapRowsToTargetPeriod(rows: YunattRawRow[], month: number, year: number) {
   const targetMonth = String(month).padStart(2, "0");
-  const maxDay = new Date(year, month, 0).getDate();
+  const maxDay = getDaysInVietnamMonth(month, year);
 
   return rows.map((row) => {
     const nextRow: YunattRawRow = {};

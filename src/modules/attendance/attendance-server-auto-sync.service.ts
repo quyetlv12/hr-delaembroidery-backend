@@ -1,5 +1,9 @@
+import { getVietnamDateParts, toVietnamDateString } from "../../common/vietnam-time";
 import { AttendanceService } from "./attendance.service";
-import { AttendanceServerSettingsService } from "./attendance-server-settings.service";
+import {
+  AttendanceServerSettingsService,
+  type AttendanceAutoSyncShiftWindow,
+} from "./attendance-server-settings.service";
 import { AttendanceServerSyncTestService } from "./attendance-server-sync-test.service";
 import type { AttendanceSettingsDto } from "./attendance.dto";
 
@@ -12,6 +16,7 @@ type SyncWindow = {
   label: string;
   startMinute: number;
   stopMinute: number;
+  intervalMinutes: number;
 };
 
 class AttendanceServerAutoSyncService {
@@ -33,10 +38,16 @@ class AttendanceServerAutoSyncService {
     }
 
     const attendanceSettings = await this.attendanceService.getSettings();
-    const activeWindow = findActiveWindow(now, attendanceSettings, {
-      startOffsetMinutes: setting.autoSyncStartOffsetMinutes,
-      windowMinutes: setting.autoSyncWindowMinutes,
-    });
+    const activeWindow = findActiveWindow(
+      now,
+      attendanceSettings,
+      {
+        startOffsetMinutes: setting.autoSyncStartOffsetMinutes,
+        windowMinutes: setting.autoSyncWindowMinutes,
+        intervalMinutes: setting.autoSyncIntervalMinutes,
+      },
+      setting.autoSyncShiftWindows,
+    );
     if (!activeWindow) {
       return;
     }
@@ -44,13 +55,13 @@ class AttendanceServerAutoSyncService {
     const bucketMinute = getBucketMinute(
       now,
       activeWindow,
-      Math.max(1, setting.autoSyncIntervalMinutes || 10),
+      activeWindow.intervalMinutes,
     );
     if (bucketMinute === null) {
       return;
     }
 
-    const runKey = `${formatLocalDate(now)}:${activeWindow.key}:${bucketMinute}`;
+    const runKey = `${toVietnamDateString(now)}:${activeWindow.key}:${bucketMinute}`;
     if (this.lastRunKeys.has(runKey)) {
       return;
     }
@@ -140,24 +151,42 @@ export function startAttendanceServerAutoSync() {
 function findActiveWindow(
   now: Date,
   settings: AttendanceSettingsDto,
-  config: { startOffsetMinutes: number; windowMinutes: number },
+  config: { startOffsetMinutes: number; windowMinutes: number; intervalMinutes: number },
+  configuredWindows?: AttendanceAutoSyncShiftWindow[] | null,
 ) {
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  const windows = buildSyncWindows(settings, config);
+  const vietnamNow = getVietnamDateParts(now);
+  const nowMinutes = vietnamNow.hour * 60 + vietnamNow.minute;
+  const windows =
+    configuredWindows && configuredWindows.length > 0
+      ? buildConfiguredSyncWindows(configuredWindows)
+      : buildSyncWindows(settings, config);
   return windows.find((window) => isMinuteInWindow(nowMinutes, window)) ?? null;
 }
 
 function buildSyncWindows(
   settings: AttendanceSettingsDto,
-  config: { startOffsetMinutes: number; windowMinutes: number },
+  config: { startOffsetMinutes: number; windowMinutes: number; intervalMinutes: number },
 ): SyncWindow[] {
   const startOffsetMinutes = clampInteger(config.startOffsetMinutes, 0, 720, 60);
   const windowMinutes = clampInteger(config.windowMinutes, 1, 720, 60);
+  const intervalMinutes = clampInteger(config.intervalMinutes, 1, 120, 10);
   return [
-    buildSyncWindow("morning", "Ca sáng", settings.morningStart, startOffsetMinutes, windowMinutes),
-    buildSyncWindow("afternoon", "Ca chiều", settings.afternoonStart, startOffsetMinutes, windowMinutes),
-    buildSyncWindow("night", "Ca 3", settings.nightStart, startOffsetMinutes, windowMinutes),
+    buildSyncWindow("morning", "Ca sáng", settings.morningStart, startOffsetMinutes, windowMinutes, intervalMinutes),
+    buildSyncWindow("afternoon", "Ca chiều", settings.afternoonStart, startOffsetMinutes, windowMinutes, intervalMinutes),
+    buildSyncWindow("night", "Ca 3", settings.nightStart, startOffsetMinutes, windowMinutes, intervalMinutes),
   ];
+}
+
+function buildConfiguredSyncWindows(configuredWindows: AttendanceAutoSyncShiftWindow[]): SyncWindow[] {
+  return configuredWindows
+    .filter((window) => window.enabled)
+    .map((window) => ({
+      key: window.key,
+      label: getShiftLabel(window.key),
+      startMinute: timeToMinutes(window.startTime),
+      stopMinute: timeToMinutes(window.endTime),
+      intervalMinutes: clampInteger(window.intervalMinutes, 1, 120, 10),
+    }));
 }
 
 function buildSyncWindow(
@@ -166,10 +195,11 @@ function buildSyncWindow(
   shiftStart: string,
   startOffsetMinutes: number,
   windowMinutes: number,
+  intervalMinutes: number,
 ): SyncWindow {
   const startMinute = normalizeDayMinute(timeToMinutes(shiftStart) + startOffsetMinutes);
   const stopMinute = normalizeDayMinute(startMinute + windowMinutes);
-  return { key, label, startMinute, stopMinute };
+  return { key, label, startMinute, stopMinute, intervalMinutes };
 }
 
 function isMinuteInWindow(minute: number, window: SyncWindow) {
@@ -181,7 +211,8 @@ function isMinuteInWindow(minute: number, window: SyncWindow) {
 }
 
 function getBucketMinute(now: Date, window: SyncWindow, intervalMinutes: number) {
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const vietnamNow = getVietnamDateParts(now);
+  const nowMinutes = vietnamNow.hour * 60 + vietnamNow.minute;
   const elapsed = getElapsedWindowMinutes(nowMinutes, window.startMinute);
   if (elapsed < 0) {
     return null;
@@ -205,8 +236,8 @@ function resolveImportPeriod(dates: string[], now: Date) {
   }
 
   return {
-    month: now.getMonth() + 1,
-    year: now.getFullYear(),
+    month: getVietnamDateParts(now).month,
+    year: getVietnamDateParts(now).year,
   };
 }
 
@@ -223,24 +254,27 @@ function clampInteger(value: number, min: number, max: number, fallback: number)
   return Number.isInteger(value) && value >= min && value <= max ? value : fallback;
 }
 
-function formatLocalDate(value: Date) {
-  return [
-    value.getFullYear(),
-    String(value.getMonth() + 1).padStart(2, "0"),
-    String(value.getDate()).padStart(2, "0"),
-  ].join("-");
-}
-
 function resolveMonthDataId(
   singleMonthDataId: string | null | undefined,
   mappings: Array<{ period: string; monthDataId: string }> | null | undefined,
   now: Date,
 ) {
-  const currentPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const vietnamNow = getVietnamDateParts(now);
+  const currentPeriod = `${vietnamNow.year}-${String(vietnamNow.month).padStart(2, "0")}`;
   const mapped = mappings?.find((mapping) => mapping.period === currentPeriod)?.monthDataId.trim();
   if (mapped) {
     return mapped;
   }
 
   return singleMonthDataId?.trim() || "";
+}
+
+function getShiftLabel(key: AttendanceAutoSyncShiftWindow["key"]) {
+  if (key === "morning") {
+    return "Ca sáng";
+  }
+  if (key === "afternoon") {
+    return "Ca chiều";
+  }
+  return "Ca 3";
 }

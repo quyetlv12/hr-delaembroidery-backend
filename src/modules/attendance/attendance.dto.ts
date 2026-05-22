@@ -183,6 +183,22 @@ export const attendanceServerSettingsDto = z.object({
     )
     .max(60, "Danh sách tháng máy chấm công quá dài")
     .optional(),
+  autoSyncShiftWindows: z
+    .array(
+      z.object({
+        key: z.enum(["morning", "afternoon", "night"]),
+        enabled: z.coerce.boolean().default(true),
+        startTime: timeSetting,
+        endTime: timeSetting,
+        intervalMinutes: z.coerce
+          .number()
+          .int("Chu kỳ đồng bộ phải là số nguyên")
+          .min(1, "Chu kỳ đồng bộ phải lớn hơn 0")
+          .max(120, "Chu kỳ đồng bộ quá lớn"),
+      }),
+    )
+    .max(3, "Chỉ cấu hình tối đa 3 ca đồng bộ")
+    .optional(),
   autoSyncStartOffsetMinutes: z.coerce
     .number()
     .int("Thời gian bắt đầu đồng bộ phải là số nguyên")

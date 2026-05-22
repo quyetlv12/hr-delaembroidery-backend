@@ -21,12 +21,21 @@ export type AttendanceServerSettingsResponse = {
   autoSyncEnabled: boolean;
   autoSyncMonthDataId: string;
   autoSyncMonthMappings: Array<{ period: string; monthDataId: string }>;
+  autoSyncShiftWindows: AttendanceAutoSyncShiftWindow[];
   autoSyncStartOffsetMinutes: number;
   autoSyncWindowMinutes: number;
   autoSyncIntervalMinutes: number;
   autoSyncLastRunAt: string | null;
   autoSyncLastStatus: string | null;
   autoSyncLastMessage: string | null;
+};
+
+export type AttendanceAutoSyncShiftWindow = {
+  key: "morning" | "afternoon" | "night";
+  enabled: boolean;
+  startTime: string;
+  endTime: string;
+  intervalMinutes: number;
 };
 
 export class AttendanceServerSettingsService {
@@ -62,6 +71,9 @@ export class AttendanceServerSettingsService {
     }
     if (dto.autoSyncMonthMappings !== undefined) {
       setting.autoSyncMonthMappings = normalizeMonthMappings(dto.autoSyncMonthMappings);
+    }
+    if (dto.autoSyncShiftWindows !== undefined) {
+      setting.autoSyncShiftWindows = normalizeShiftWindows(dto.autoSyncShiftWindows);
     }
     if (dto.autoSyncStartOffsetMinutes !== undefined) {
       setting.autoSyncStartOffsetMinutes = dto.autoSyncStartOffsetMinutes;
@@ -155,6 +167,7 @@ export class AttendanceServerSettingsService {
       autoSyncEnabled: setting?.autoSyncEnabled ?? false,
       autoSyncMonthDataId: setting?.autoSyncMonthDataId ?? "",
       autoSyncMonthMappings: normalizeMonthMappings(setting?.autoSyncMonthMappings ?? []),
+      autoSyncShiftWindows: normalizeShiftWindows(setting?.autoSyncShiftWindows ?? []),
       autoSyncStartOffsetMinutes: setting?.autoSyncStartOffsetMinutes ?? 60,
       autoSyncWindowMinutes: setting?.autoSyncWindowMinutes ?? 60,
       autoSyncIntervalMinutes: setting?.autoSyncIntervalMinutes ?? 10,
@@ -163,6 +176,54 @@ export class AttendanceServerSettingsService {
       autoSyncLastMessage: setting?.autoSyncLastMessage ?? null,
     };
   }
+}
+
+const shiftWindowKeys = ["morning", "afternoon", "night"] as const;
+
+function normalizeShiftWindows(value: unknown): AttendanceAutoSyncShiftWindow[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const map = new Map<AttendanceAutoSyncShiftWindow["key"], AttendanceAutoSyncShiftWindow>();
+  for (const item of value) {
+    if (!isObjectRecord(item)) {
+      continue;
+    }
+    const key = typeof item.key === "string" ? item.key : "";
+    if (!isShiftWindowKey(key)) {
+      continue;
+    }
+    const startTime = typeof item.startTime === "string" ? item.startTime.trim() : "";
+    const endTime = typeof item.endTime === "string" ? item.endTime.trim() : "";
+    const intervalMinutes = Number(item.intervalMinutes);
+    if (!isTimeString(startTime) || !isTimeString(endTime)) {
+      continue;
+    }
+
+    map.set(key, {
+      key,
+      enabled: item.enabled !== false,
+      startTime,
+      endTime,
+      intervalMinutes: Number.isInteger(intervalMinutes)
+        ? Math.min(120, Math.max(1, intervalMinutes))
+        : 10,
+    });
+  }
+
+  return shiftWindowKeys.flatMap((key) => {
+    const window = map.get(key);
+    return window ? [window] : [];
+  });
+}
+
+function isShiftWindowKey(value: string): value is AttendanceAutoSyncShiftWindow["key"] {
+  return (shiftWindowKeys as readonly string[]).includes(value);
+}
+
+function isTimeString(value: string) {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 }
 
 function maskCookie(cookie?: string | null) {

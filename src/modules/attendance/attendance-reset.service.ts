@@ -1,5 +1,6 @@
 import type { EntityManager } from "typeorm";
 
+import { getDaysInVietnamMonth } from "../../common/vietnam-time";
 import { AppDataSource } from "../../database/data-source";
 import type { ResetAttendancePayrollDto } from "./attendance.dto";
 
@@ -193,7 +194,7 @@ function getAffectedRows(result: unknown): number {
 }
 
 function getMonthRange(month: number, year: number) {
-  const lastDay = new Date(year, month, 0).getDate();
+  const lastDay = getDaysInVietnamMonth(month, year);
   return {
     from: `${year}-${String(month).padStart(2, "0")}-01`,
     to: `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`,

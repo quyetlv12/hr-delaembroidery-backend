@@ -18,11 +18,15 @@ import {
   restorePayrollBonusesController,
   revertPayrollFormulaHistoryController,
   revertPayrollRecordHistoryController,
+  sendPayrollPayslipEmailsController,
+  sendPayrollPayslipTestEmailController,
   unlockPayrollController,
   updatePayrollRecordController,
   updatePayrollFormulaSettingController,
 } from "./payroll.controller";
 import {
+  payrollPayslipEmailDto,
+  payrollPayslipTestEmailDto,
   payrollFormulaSettingDto,
   payrollFormulaTemplateCreateDto,
   payrollPeriodDto,
@@ -94,10 +98,22 @@ payrollRoutes.patch(
   validateBody(payrollRecordUpdateDto),
   updatePayrollRecordController,
 );
+payrollRoutes.post(
+  "/records/:id/payslip-test-email",
+  permissionGuard(PERMISSIONS.payslipEmailSend),
+  validateBody(payrollPayslipTestEmailDto),
+  sendPayrollPayslipTestEmailController,
+);
 payrollRoutes.get(
   "/periods/:id/transfer-file",
   permissionGuard(PERMISSIONS.bankTransferExport),
   exportPayrollTransferFileController,
+);
+payrollRoutes.post(
+  "/periods/:id/payslip-emails",
+  permissionGuard(PERMISSIONS.payslipEmailSend),
+  validateBody(payrollPayslipEmailDto),
+  sendPayrollPayslipEmailsController,
 );
 payrollRoutes.post("/periods/:id/lock", permissionGuard(PERMISSIONS.payrollLock), lockPayrollController);
 payrollRoutes.post("/periods/:id/unlock", permissionGuard(PERMISSIONS.payrollLock), unlockPayrollController);
