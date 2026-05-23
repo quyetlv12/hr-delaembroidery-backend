@@ -14,6 +14,7 @@ import { employeeViewSettingsRoutes } from "./modules/employee-view-settings/emp
 import { employeeRoutes } from "./modules/employees/employee.routes";
 import { organizationRoutes } from "./modules/organization/organization.routes";
 import { payrollRoutes } from "./modules/payroll/payroll.routes";
+import { publicDashboardRoutes } from "./modules/public-dashboard/public-dashboard.routes";
 import { reportsRoutes } from "./modules/reports/reports.routes";
 import { rolesPermissionRoutes } from "./modules/roles-permissions/roles-permissions.routes";
 import { errorMiddleware } from "./middlewares/error.middleware";
@@ -23,6 +24,7 @@ export function createApp() {
   const app = express();
 
   app.use(helmet());
+  app.use(`${env.API_PREFIX}/public/dashboard`, publicDashboardRoutes);
   app.use(cors({ origin: env.FRONTEND_ORIGIN, credentials: true }));
   app.use(express.json({ limit: "2mb" }));
   app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));

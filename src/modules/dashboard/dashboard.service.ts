@@ -1,6 +1,6 @@
 import { MoreThan } from "typeorm";
 
-import { formatVietnamTime, getVietnamDateParts, toVietnamDateString } from "../../common/vietnam-time";
+import { APP_TIME_ZONE, formatVietnamTime, getVietnamDateParts, toVietnamDateString } from "../../common/vietnam-time";
 import { AppDataSource } from "../../database/data-source";
 import { AttendanceSetting, AttendanceSummary, Employee, SalaryRecord } from "../../entities";
 
@@ -59,6 +59,33 @@ export class DashboardService {
       employeesByDepartment,
       employeeGrowth,
       todayShiftAbsences,
+    };
+  }
+
+  async getPublicSummary() {
+    const now = new Date();
+    const today = toVietnamDateString(now);
+    const [activeEmployees, lateEmployeeRows] = await Promise.all([
+      this.countActiveEmployees({}),
+      this.getTodayLateEmployees({}, today),
+    ]);
+
+    return {
+      date: today,
+      timezone: APP_TIME_ZONE,
+      generatedAt: formatVietnamDateTime(now),
+      workingEmployeeCount: activeEmployees,
+      lateEmployeeCount: lateEmployeeRows.length,
+      lateEmployees: lateEmployeeRows.map((employee) => ({
+        employeeId: employee.employeeId,
+        employeeCode: employee.employeeCode,
+        fullName: employee.fullName,
+        avatarUrl: employee.avatarUrl,
+        departmentName: employee.departmentName,
+        positionName: employee.positionName,
+        lateMinutes: employee.lateMinutes,
+        checkInAt: employee.firstCheckInAt,
+      })),
     };
   }
 
@@ -402,6 +429,13 @@ function formatDayLabel(value: string) {
   const dateStr = value.slice(0, 10);
   const [, month, day] = dateStr.split("-");
   return `${day}/${month}`;
+}
+
+function formatVietnamDateTime(value: Date) {
+  const { year, month, day, hour, minute, second } = getVietnamDateParts(value);
+  const date = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const time = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
+  return `${date}T${time}+07:00`;
 }
 
 type AttendanceSettingsForShift = {

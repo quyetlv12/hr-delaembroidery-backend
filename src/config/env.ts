@@ -8,6 +8,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(4000),
   API_PREFIX: z.string().default("/api"),
   FRONTEND_ORIGIN: z.string().default("http://localhost:5173"),
+  PUBLIC_DASHBOARD_ALLOWED_ORIGINS: z.string().default(""),
   DB_HOST: z.string().default("localhost"),
   DB_PORT: z.coerce.number().default(3306),
   DB_USER: z.string().default("root"),
