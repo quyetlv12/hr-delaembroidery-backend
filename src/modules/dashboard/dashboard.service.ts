@@ -65,9 +65,12 @@ export class DashboardService {
   async getPublicSummary() {
     const now = new Date();
     const today = toVietnamDateString(now);
-    const [activeEmployees, lateEmployeeRows] = await Promise.all([
+    const currentMonthRange = resolveCurrentMonthToDateRange(now);
+    const [activeEmployees, lateEmployeeRows, monthlyAttendance, monthlyTotalsByEmployee] = await Promise.all([
       this.countActiveEmployees({}),
       this.getTodayLateEmployees({}, today),
+      this.getPublicMonthlyAttendance(currentMonthRange),
+      this.getMonthlyAttendanceTotalsByEmployee(currentMonthRange),
     ]);
 
     return {
@@ -76,16 +79,10 @@ export class DashboardService {
       generatedAt: formatVietnamDateTime(now),
       workingEmployeeCount: activeEmployees,
       lateEmployeeCount: lateEmployeeRows.length,
-      lateEmployees: lateEmployeeRows.map((employee) => ({
-        employeeId: employee.employeeId,
-        employeeCode: employee.employeeCode,
-        fullName: employee.fullName,
-        avatarUrl: employee.avatarUrl,
-        departmentName: employee.departmentName,
-        positionName: employee.positionName,
-        lateMinutes: employee.lateMinutes,
-        checkInAt: employee.firstCheckInAt,
-      })),
+      monthlyAttendance,
+      lateEmployees: lateEmployeeRows.map((employee) =>
+        toPublicLateEmployee(employee, monthlyTotalsByEmployee.get(employee.employeeId)),
+      ),
     };
   }
 
@@ -213,6 +210,70 @@ export class DashboardService {
 
     const result = await qb.getRawOne<{ total: string }>();
     return Number(result?.total ?? 0);
+  }
+
+  private async getPublicMonthlyAttendance(range: CurrentMonthRange) {
+    const result = await this.attendanceRepository
+      .createQueryBuilder("attendance")
+      .leftJoin("attendance.employee", "employee")
+      .select("COALESCE(SUM(attendance.lateMinutes), 0)", "totalLateMinutes")
+      .addSelect("COALESCE(SUM(attendance.earlyLeaveMinutes), 0)", "totalEarlyLeaveMinutes")
+      .addSelect("COUNT(DISTINCT CASE WHEN attendance.lateMinutes > 0 THEN employee.id END)", "lateEmployeeCount")
+      .addSelect(
+        "COUNT(DISTINCT CASE WHEN attendance.earlyLeaveMinutes > 0 THEN employee.id END)",
+        "earlyLeaveEmployeeCount",
+      )
+      .where("attendance.workDate BETWEEN :from AND :to", { from: range.from, to: range.to })
+      .getRawOne<{
+        totalLateMinutes: string;
+        totalEarlyLeaveMinutes: string;
+        lateEmployeeCount: string;
+        earlyLeaveEmployeeCount: string;
+      }>();
+
+    const totalLateMinutes = Number(result?.totalLateMinutes ?? 0);
+    const totalEarlyLeaveMinutes = Number(result?.totalEarlyLeaveMinutes ?? 0);
+    const totalEarlyLateMinutes = totalLateMinutes + totalEarlyLeaveMinutes;
+
+    return {
+      month: range.month,
+      from: range.from,
+      to: range.to,
+      lateEmployeeCount: Number(result?.lateEmployeeCount ?? 0),
+      earlyLeaveEmployeeCount: Number(result?.earlyLeaveEmployeeCount ?? 0),
+      totalLateMinutes,
+      totalEarlyLeaveMinutes,
+      totalEarlyLateMinutes,
+      totalLateHours: minutesToHours(totalLateMinutes),
+      totalEarlyLeaveHours: minutesToHours(totalEarlyLeaveMinutes),
+      totalEarlyLateHours: minutesToHours(totalEarlyLateMinutes),
+    };
+  }
+
+  private async getMonthlyAttendanceTotalsByEmployee(range: CurrentMonthRange) {
+    const rows = await this.attendanceRepository
+      .createQueryBuilder("attendance")
+      .leftJoin("attendance.employee", "employee")
+      .select("employee.id", "employeeId")
+      .addSelect("COALESCE(SUM(attendance.lateMinutes), 0)", "lateMinutes")
+      .addSelect("COALESCE(SUM(attendance.earlyLeaveMinutes), 0)", "earlyLeaveMinutes")
+      .where("attendance.workDate BETWEEN :from AND :to", { from: range.from, to: range.to })
+      .groupBy("employee.id")
+      .getRawMany<{ employeeId: string; lateMinutes: string; earlyLeaveMinutes: string }>();
+
+    return new Map(
+      rows.map((row) => {
+        const lateMinutes = Number(row.lateMinutes ?? 0);
+        const earlyLeaveMinutes = Number(row.earlyLeaveMinutes ?? 0);
+        return [
+          row.employeeId,
+          {
+            lateMinutes,
+            earlyLeaveMinutes,
+          },
+        ] as const;
+      }),
+    );
   }
 
   // ── Charts ────────────────────────────────────────────────────────────
@@ -447,6 +508,20 @@ type AttendanceSettingsForShift = {
   nightEnd: string;
 };
 
+type CurrentMonthRange = { month: string; from: string; to: string };
+type MonthlyAttendanceTotals = { lateMinutes: number; earlyLeaveMinutes: number };
+
+type PublicLateEmployeeSource = {
+  employeeId: string;
+  employeeCode: string;
+  fullName: string;
+  avatarUrl: string | null;
+  departmentName: string;
+  positionName: string;
+  lateMinutes: number;
+  firstCheckInAt: string | null;
+};
+
 type CurrentShift = {
   key: "morning" | "afternoon" | "night";
   label: string;
@@ -457,6 +532,45 @@ type CurrentShift = {
 };
 
 const SHIFT_CHECK_IN_TOLERANCE_MINUTES = 45;
+
+function toPublicLateEmployee(employee: PublicLateEmployeeSource, monthlyTotals?: MonthlyAttendanceTotals) {
+  const monthlyLateMinutes = monthlyTotals?.lateMinutes ?? 0;
+  const monthlyEarlyLeaveMinutes = monthlyTotals?.earlyLeaveMinutes ?? 0;
+  const monthlyEarlyLateMinutes = monthlyLateMinutes + monthlyEarlyLeaveMinutes;
+
+  return {
+    employeeId: employee.employeeId,
+    employeeCode: employee.employeeCode,
+    fullName: employee.fullName,
+    avatarUrl: employee.avatarUrl,
+    departmentName: employee.departmentName,
+    positionName: employee.positionName,
+    lateMinutes: employee.lateMinutes,
+    checkInAt: employee.firstCheckInAt,
+    monthlyLateMinutes,
+    monthlyEarlyLeaveMinutes,
+    monthlyEarlyLateMinutes,
+    monthlyLateHours: minutesToHours(monthlyLateMinutes),
+    monthlyEarlyLeaveHours: minutesToHours(monthlyEarlyLeaveMinutes),
+    monthlyEarlyLateHours: minutesToHours(monthlyEarlyLateMinutes),
+  };
+}
+
+function resolveCurrentMonthToDateRange(now: Date): CurrentMonthRange {
+  const { year, month, day } = getVietnamDateParts(now);
+  const paddedMonth = String(month).padStart(2, "0");
+  const monthValue = `${year}-${paddedMonth}`;
+
+  return {
+    month: monthValue,
+    from: `${monthValue}-01`,
+    to: `${monthValue}-${String(day).padStart(2, "0")}`,
+  };
+}
+
+function minutesToHours(minutes: number) {
+  return Math.round((minutes / 60) * 100) / 100;
+}
 
 function hasCurrentShiftPunch(
   summary: AttendanceSummary,
