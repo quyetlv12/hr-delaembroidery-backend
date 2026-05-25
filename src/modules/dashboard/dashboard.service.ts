@@ -1,8 +1,13 @@
-import { MoreThan } from "typeorm";
-
 import { APP_TIME_ZONE, formatVietnamTime, getVietnamDateParts, toVietnamDateString } from "../../common/vietnam-time";
 import { AppDataSource } from "../../database/data-source";
 import { AttendanceSetting, AttendanceSummary, Employee, SalaryRecord } from "../../entities";
+import {
+  buildPublicLateShifts,
+  minutesToHours,
+  resolveCurrentMonthToDateRange,
+  toPublicLateEmployee,
+  type CurrentMonthRange,
+} from "./public-dashboard-summary";
 
 export type DashboardFilter = {
   employeeId?: string;
@@ -24,7 +29,6 @@ export class DashboardService {
     const [
       totalEmployees,
       activeEmployees,
-      todayLateEmployees,
       todayLateEmployeeRows,
       monthlyPayroll,
       overtimeMinutes,
@@ -36,7 +40,6 @@ export class DashboardService {
     ] = await Promise.all([
       this.countEmployees(filter),
       this.countActiveEmployees(filter),
-      this.countTodayLate(filter, today),
       this.getTodayLateEmployees(filter, today),
       this.sumPayroll(filter, range),
       this.sumOvertimeMinutes(filter, range),
@@ -50,7 +53,7 @@ export class DashboardService {
     return {
       totalEmployees,
       activeEmployees,
-      todayLateEmployees,
+      todayLateEmployees: todayLateEmployeeRows.length,
       todayLateEmployeeRows,
       monthlyPayroll,
       overtimeHours: Math.round((overtimeMinutes / 60) * 10) / 10,
@@ -103,16 +106,6 @@ export class DashboardService {
     return this.employeeRepository.count({ where: { status: "active" } });
   }
 
-  private countTodayLate(filter: DashboardFilter, today: string) {
-    return this.attendanceRepository.count({
-      where: {
-        workDate: today,
-        lateMinutes: MoreThan(0),
-        ...(filter.employeeId ? { employee: { id: filter.employeeId } } : {}),
-      },
-    });
-  }
-
   private async getTodayLateEmployees(filter: DashboardFilter, today: string) {
     const settings = await this.getAttendanceSettings();
     const qb = this.attendanceRepository
@@ -121,61 +114,72 @@ export class DashboardService {
       .leftJoinAndSelect("employee.department", "department")
       .leftJoinAndSelect("employee.position", "position")
       .where("attendance.workDate = :today", { today })
-      .andWhere("attendance.lateMinutes > 0")
-      .orderBy("attendance.lateMinutes", "DESC")
-      .addOrderBy("employee.employeeCode", "ASC");
+      .orderBy("employee.employeeCode", "ASC");
 
     if (filter.employeeId) {
       qb.andWhere("employee.id = :employeeId", { employeeId: filter.employeeId });
     }
 
     const rows = await qb.getMany();
-    return rows.map((summary) => ({
-      employeeId: summary.employee.id,
-      employeeCode: summary.employee.employeeCode,
-      fullName: summary.employee.fullName,
-      avatarUrl: summary.employee.avatarUrl ?? null,
-      departmentName: summary.employee.department?.name ?? "Chưa phân bộ phận",
-      positionName: summary.employee.position?.name ?? "Chưa có chức vụ",
-      lateMinutes: Number(summary.lateMinutes ?? 0),
-      firstCheckInAt: formatVietnamTime(
-        summary.morningCheckInAt ?? summary.afternoonCheckInAt ?? summary.nightCheckInAt ?? summary.checkInAt,
-      ),
-      attendance: {
-        date: summary.workDate,
-        workDay: Number(summary.workDay ?? 0),
-        lateMinutes: Number(summary.lateMinutes ?? 0),
-        earlyLeaveMinutes: Number(summary.earlyLeaveMinutes ?? 0),
-        overtimeMinutes: Number(summary.overtimeMinutes ?? 0),
-        status: summary.status,
-        shifts: [
-          {
-            key: "morning",
-            label: "Ca sáng",
-            plannedStart: settings.morningStart,
-            plannedEnd: settings.morningEnd,
-            checkInAt: formatVietnamTime(summary.morningCheckInAt),
-            checkOutAt: formatVietnamTime(summary.morningCheckOutAt),
+    return rows
+      .map((summary) => {
+        const lateShifts = buildPublicLateShifts(summary, settings);
+
+        return {
+          employeeId: summary.employee.id,
+          employeeCode: summary.employee.employeeCode,
+          fullName: summary.employee.fullName,
+          avatarUrl: summary.employee.avatarUrl ?? null,
+          departmentName: summary.employee.department?.name ?? "Chưa phân bộ phận",
+          positionName: summary.employee.position?.name ?? "Chưa có chức vụ",
+          lateMinutes: Number(summary.lateMinutes ?? 0),
+          firstCheckInAt:
+            lateShifts[0]?.checkInAt ??
+            formatVietnamTime(
+              summary.morningCheckInAt ?? summary.afternoonCheckInAt ?? summary.nightCheckInAt ?? summary.checkInAt,
+            ),
+          lateShifts,
+          attendance: {
+            date: summary.workDate,
+            workDay: Number(summary.workDay ?? 0),
+            lateMinutes: Number(summary.lateMinutes ?? 0),
+            earlyLeaveMinutes: Number(summary.earlyLeaveMinutes ?? 0),
+            overtimeMinutes: Number(summary.overtimeMinutes ?? 0),
+            status: summary.status,
+            shifts: [
+              {
+                key: "morning",
+                label: "Ca sáng",
+                plannedStart: settings.morningStart,
+                plannedEnd: settings.morningEnd,
+                checkInAt: formatVietnamTime(summary.morningCheckInAt),
+                checkOutAt: formatVietnamTime(summary.morningCheckOutAt),
+              },
+              {
+                key: "afternoon",
+                label: "Ca chiều",
+                plannedStart: settings.afternoonStart,
+                plannedEnd: settings.afternoonEnd,
+                checkInAt: formatVietnamTime(summary.afternoonCheckInAt),
+                checkOutAt: formatVietnamTime(summary.afternoonCheckOutAt),
+              },
+              {
+                key: "night",
+                label: "Ca 3",
+                plannedStart: settings.nightStart,
+                plannedEnd: settings.nightEnd,
+                checkInAt: formatVietnamTime(summary.nightCheckInAt),
+                checkOutAt: formatVietnamTime(summary.nightCheckOutAt),
+              },
+            ],
           },
-          {
-            key: "afternoon",
-            label: "Ca chiều",
-            plannedStart: settings.afternoonStart,
-            plannedEnd: settings.afternoonEnd,
-            checkInAt: formatVietnamTime(summary.afternoonCheckInAt),
-            checkOutAt: formatVietnamTime(summary.afternoonCheckOutAt),
-          },
-          {
-            key: "night",
-            label: "Ca 3",
-            plannedStart: settings.nightStart,
-            plannedEnd: settings.nightEnd,
-            checkInAt: formatVietnamTime(summary.nightCheckInAt),
-            checkOutAt: formatVietnamTime(summary.nightCheckOutAt),
-          },
-        ],
-      },
-    }));
+        };
+      })
+      .filter((row) => row.lateMinutes > 0 || row.lateShifts.length > 0)
+      .sort((left, right) => {
+        const lateMinutesDiff = getLateRowSortMinutes(right) - getLateRowSortMinutes(left);
+        return lateMinutesDiff === 0 ? left.employeeCode.localeCompare(right.employeeCode) : lateMinutesDiff;
+      });
   }
 
   // ── Sums ──────────────────────────────────────────────────────────────
@@ -499,6 +503,11 @@ function formatVietnamDateTime(value: Date) {
   return `${date}T${time}+07:00`;
 }
 
+function getLateRowSortMinutes(row: { lateMinutes: number; lateShifts: Array<{ lateMinutes: number }> }) {
+  const lateShiftMinutes = row.lateShifts.reduce((total, shift) => total + shift.lateMinutes, 0);
+  return Math.max(row.lateMinutes, lateShiftMinutes);
+}
+
 type AttendanceSettingsForShift = {
   morningStart: string;
   morningEnd: string;
@@ -506,20 +515,6 @@ type AttendanceSettingsForShift = {
   afternoonEnd: string;
   nightStart: string;
   nightEnd: string;
-};
-
-type CurrentMonthRange = { month: string; from: string; to: string };
-type MonthlyAttendanceTotals = { lateMinutes: number; earlyLeaveMinutes: number };
-
-type PublicLateEmployeeSource = {
-  employeeId: string;
-  employeeCode: string;
-  fullName: string;
-  avatarUrl: string | null;
-  departmentName: string;
-  positionName: string;
-  lateMinutes: number;
-  firstCheckInAt: string | null;
 };
 
 type CurrentShift = {
@@ -532,45 +527,6 @@ type CurrentShift = {
 };
 
 const SHIFT_CHECK_IN_TOLERANCE_MINUTES = 45;
-
-function toPublicLateEmployee(employee: PublicLateEmployeeSource, monthlyTotals?: MonthlyAttendanceTotals) {
-  const monthlyLateMinutes = monthlyTotals?.lateMinutes ?? 0;
-  const monthlyEarlyLeaveMinutes = monthlyTotals?.earlyLeaveMinutes ?? 0;
-  const monthlyEarlyLateMinutes = monthlyLateMinutes + monthlyEarlyLeaveMinutes;
-
-  return {
-    employeeId: employee.employeeId,
-    employeeCode: employee.employeeCode,
-    fullName: employee.fullName,
-    avatarUrl: employee.avatarUrl,
-    departmentName: employee.departmentName,
-    positionName: employee.positionName,
-    lateMinutes: employee.lateMinutes,
-    checkInAt: employee.firstCheckInAt,
-    monthlyLateMinutes,
-    monthlyEarlyLeaveMinutes,
-    monthlyEarlyLateMinutes,
-    monthlyLateHours: minutesToHours(monthlyLateMinutes),
-    monthlyEarlyLeaveHours: minutesToHours(monthlyEarlyLeaveMinutes),
-    monthlyEarlyLateHours: minutesToHours(monthlyEarlyLateMinutes),
-  };
-}
-
-function resolveCurrentMonthToDateRange(now: Date): CurrentMonthRange {
-  const { year, month, day } = getVietnamDateParts(now);
-  const paddedMonth = String(month).padStart(2, "0");
-  const monthValue = `${year}-${paddedMonth}`;
-
-  return {
-    month: monthValue,
-    from: `${monthValue}-01`,
-    to: `${monthValue}-${String(day).padStart(2, "0")}`,
-  };
-}
-
-function minutesToHours(minutes: number) {
-  return Math.round((minutes / 60) * 100) / 100;
-}
 
 function hasCurrentShiftPunch(
   summary: AttendanceSummary,
