@@ -1709,7 +1709,11 @@ function buildShiftSessions(times: number[], shiftCount = 2, schedule: ShiftSche
       sessions.afternoonIn = second;
     }
     if (third !== undefined && third >= schedule.afternoonStart) {
-      sessions.afternoonOut = third;
+      if (sessions.afternoonIn === null) {
+        sessions.afternoonIn = third;
+      } else {
+        sessions.afternoonOut = third;
+      }
     } else if (third !== undefined) {
       sessions.morningOut = third;
     }
